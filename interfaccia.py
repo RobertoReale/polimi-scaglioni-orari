@@ -801,7 +801,9 @@ class SchedaEsplora(ttk.Frame):
             lung = max([len(ex.label(c))] + [len(str(r.get(c) or "")) for r in righe[:200]])
             self.tree.column(c, width=min(max(lung * 8 + 16, 60), 400), stretch=False)
         for n, r in enumerate(righe[:MAX_ANTEPRIMA]):
-            self.tree.insert("", "end", values=["" if r.get(c) is None else r.get(c) for c in cols],
+            # nell'anteprima una cella mostra una riga sola: le lezioni dello stesso giorno separate da " / "
+            self.tree.insert("", "end", values=["" if r.get(c) is None else str(r.get(c)).replace(chr(10), " / ")
+                                                for c in cols],
                              tags=("alt",) if n % 2 else ())
         extra = f" (nell'anteprima le prime {MAX_ANTEPRIMA}; il salvataggio le include tutte)" if len(righe) > MAX_ANTEPRIMA else ""
         self.lbl_n.config(text=f"{len(righe)} righe{extra}. Doppio clic su una riga per vederla per intero.")

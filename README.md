@@ -52,9 +52,12 @@ Se manca una scelta, il programma lo segnala prima di partire. Nulla viene scelt
    | Tabella | Una riga per… |
    |---|---|
    | Insegnamenti | ogni insegnamento di ogni piano: periodo, CFU, n. scaglioni, docenti |
-   | Scaglioni | ogni scaglione: lettere da/a, docenti, moduli, orario in sintesi (es. `Mar 15:15-18:15 7.1.3; …`) |
+   | Scaglioni | ogni scaglione con il suo orario settimanale: una colonna per giorno (Lunedì…Sabato, es. `15:15–18:15 aula 7.1.3`), le aule con l'edificio, il periodo delle lezioni, docenti, moduli |
    | Lezioni (orario) | ogni lezione settimanale: giorno, ora di inizio e fine, aula ed edificio, date |
    | Corsi e piani | ogni piano di studio, compresi quelli scartati perché di un'altra sede |
+
+   Negli insegnamenti annuali con orari diversi nei due semestri, accanto a ogni lezione della tabella
+   Scaglioni ci sono le date in cui vale, es. `09:15–13:15 aula G.3 [24/02→26/05]`.
 
 3. Restringi i risultati con i **filtri**: corso, piano, periodo, insegnamento, scaglione, giorno, aula,
    docente, oppure cerca un testo libero.

@@ -48,7 +48,8 @@ LABELS = {
     "attivita": "Attività", "dal": "Dal", "al": "Al", "n_date": "N. date", "date_lezioni": "Date lezioni",
     "semestre": "Semestre", "periodo_orario": "Periodo orario",
     "stato": "Stato", "n_insegnamenti_totali": "Insegnamenti nel piano", "n_insegnamenti": "Insegnamenti scaricati",
-    "piani": "Piani", "corsi": "Corsi",
+    "piani": "Piani", "corsi": "Corsi", "periodo_lezioni": "Periodo lezioni",
+    "lun": "Lunedì", "mar": "Martedì", "mer": "Mercoledì", "gio": "Giovedì", "ven": "Venerdì", "sab": "Sabato",
 }
 
 CONTESTO = ["aa", "scuola", "corso_codice", "corso", "tipo_laurea", "piano_codice", "piano",
@@ -61,8 +62,9 @@ COLONNE = {
     "insegnamenti": _TESTA + ["codice", "insegnamento", "periodo", "cfu", "n_scaglioni", "scaglioni", "docenti",
                               "n_lezioni", "tipo", "ssd", "lingua", "sede_erogazione", "blocco", "anno_corso",
                               "nota", "url"] + _CODA,
-    "scaglioni": _TESTA + ["codice", "insegnamento", "periodo", "cfu", "scaglione", "docenti", "orario",
-                           "ore_settimanali", "n_lezioni", "aule", "moduli", "da", "a", "sezione", "url"] + _CODA,
+    "scaglioni": _TESTA + ["codice", "insegnamento", "periodo", "cfu", "scaglione", "lun", "mar", "mer", "gio", "ven",
+                           "sab", "aule", "periodo_lezioni", "docenti", "ore_settimanali", "n_lezioni", "orario",
+                           "moduli", "da", "a", "sezione", "url"] + _CODA,
     "lezioni": _TESTA + ["codice", "insegnamento", "periodo", "scaglione", "giorno", "inizio", "fine", "aula",
                          "edificio", "docenti", "attivita", "dal", "al", "durata_min", "n_date", "date_lezioni",
                          "periodo_orario", "giorno_n", "da", "a", "url"] + _CODA,
@@ -72,7 +74,7 @@ COLONNE = {
 
 DESCRIZIONI = {
     "insegnamenti": "Una riga per insegnamento di ogni piano: periodo, CFU, n. scaglioni, docenti",
-    "scaglioni": "Una riga per scaglione: lettere da/a, docenti, moduli e sintesi dell'orario",
+    "scaglioni": "Una riga per scaglione: lettere da/a, docenti e il suo orario settimanale (una colonna per giorno, con le aule)",
     "lezioni": "Una riga per lezione settimanale: giorno, ora, aula, date",
     "piani": "Una riga per corso e piano di studi (anche quelli scartati perché di altre sedi)",
 }
@@ -81,6 +83,8 @@ DESCRIZIONI = {
 # corso anche quando lo scaglione è lo stesso): ignorate quando si uniscono i duplicati
 VARIABILI_PER_PIANO = set(CONTESTO) | {"url", "blocco", "anno_corso", "sezione"}
 
+GIORNI_COLONNE = {"Lunedì": "lun", "Martedì": "mar", "Mercoledì": "mer", "Giovedì": "gio",
+                  "Venerdì": "ven", "Sabato": "sab"}
 GIORNI_BREVI = {"Lunedì": "Lun", "Martedì": "Mar", "Mercoledì": "Mer", "Giovedì": "Gio",
                 "Venerdì": "Ven", "Sabato": "Sab", "Domenica": "Dom"}
 
@@ -164,6 +168,54 @@ def _sintesi_orario(lezioni):
     return "; ".join(parti)
 
 
+def _ordina_lezioni(lezioni):
+    return sorted(lezioni, key=lambda x: (x.get("giorno_n") or 9, x.get("inizio") or ""))
+
+
+def _edificio(descr):
+    """'Milano Città Studi - Via Bonardi - Edificio 13 - Piano Primo' -> 'Ed. 13'."""
+    m = re.search(r"Edificio\s+(\S+)", descr or "")
+    return f"Ed. {m.group(1)}" if m else ""
+
+
+def _giorni_scaglione(lezioni):
+    """{'lun': '08:15–10:15 aula 2.1.4', ...}: l'orario dello scaglione, una colonna per giorno."""
+    periodi = [(_data(lz.get("dal")), _data(lz.get("al"))) for lz in lezioni]
+    periodi = [p for p in periodi if p[0] and p[1]]
+    # corsi annuali: orari diversi nei due semestri -> accanto a ogni lezione le sue date
+    con_date = any(a[1] < b[0] or b[1] < a[0] for a in periodi for b in periodi)
+    out = {}
+    for lz in sorted(lezioni, key=lambda x: (x.get("giorno_n") or 9, _data(x.get("dal")) or datetime.min,
+                                             x.get("inizio") or "")):
+        col = GIORNI_COLONNE.get(lz.get("giorno"))
+        if not col:
+            continue
+        testo = f"{lz.get('inizio')}–{lz.get('fine')}"
+        if lz.get("aula"):
+            testo += f" aula {lz['aula']}"
+        attivita = re.sub(r"\s*\[sez\..*?\]\s*$", "", lz.get("attivita") or "").strip()
+        if attivita and attivita != lz.get("insegnamento"):
+            testo += f" ({attivita})"
+        if con_date and lz.get("dal"):
+            testo += f" [{lz['dal'][:5]}→{(lz.get('al') or '')[:5]}]"
+        out[col] = f"{out[col]}\n{testo}" if col in out else testo  # una lezione per riga nella cella
+    return out
+
+
+def _data(gg_mm_aaaa):
+    try:
+        return datetime.strptime(gg_mm_aaaa, "%d/%m/%Y")
+    except (TypeError, ValueError):
+        return None
+
+
+def _periodo_lezioni(lezioni):
+    """Dalla prima all'ultima data di lezione dello scaglione."""
+    dal = [d for d in (_data(lz.get("dal")) for lz in lezioni) if d]
+    al = [d for d in (_data(lz.get("al")) for lz in lezioni) if d]
+    return f"{min(dal):%d/%m/%Y} → {max(al):%d/%m/%Y}" if dal and al else ""
+
+
 def tabelle(dati):
     """Dizionario {nome_tabella: lista di righe (dict)} dal JSON dello scraper."""
     out = {k: [] for k in COLONNE}
@@ -185,7 +237,7 @@ def tabelle(dati):
                         nome_sc = _nome_scaglione(sc.get("da"), sc.get("a"))
                         nomi_sc.append(nome_sc)
                         tutti_doc += [d for d in sc.get("docenti", []) if d not in tutti_doc]
-                        lez_sc = [lz for lz in lez_sez
+                        lez_sc = [{**lz, "insegnamento": ins.get("nome")} for lz in lez_sez
                                   if (lz.get("scaglione_da"), lz.get("scaglione_a")) == (sc.get("da"), sc.get("a"))]
                         moduli = [r.get("modulo") for r in sc.get("righe", []) if r.get("modulo")]
                         out["scaglioni"].append({
@@ -194,7 +246,10 @@ def tabelle(dati):
                             "moduli": "; ".join(dict.fromkeys(moduli)), "n_lezioni": len(lez_sc),
                             "ore_settimanali": _num(round(sum(lz.get("durata_min") or 0 for lz in lez_sc) / 60, 2)),
                             "orario": _sintesi_orario(lez_sc) or _nota_chiara(sez.get("orario_nota")),
-                            "aule": ", ".join(dict.fromkeys(lz.get("aula") for lz in lez_sc if lz.get("aula"))),
+                            "aule": ", ".join(dict.fromkeys(
+                                f"{lz['aula']} ({_edificio(lz.get('aula_descrizione'))})" if _edificio(lz.get("aula_descrizione"))
+                                else lz["aula"] for lz in _ordina_lezioni(lez_sc) if lz.get("aula"))),
+                            "periodo_lezioni": _periodo_lezioni(lez_sc), **_giorni_scaglione(lez_sc),
                         })
                     doc_sc = {(sc.get("da"), sc.get("a")): _lista(sc.get("docenti")) for sc in sez.get("scaglioni", [])}
                     for lz in lez_sez:
@@ -322,8 +377,12 @@ def esporta_xlsx(path, fogli):
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = PatternFill("solid", fgColor="1F4E79")
             cell.alignment = Alignment(vertical="center", wrap_text=True)
+        a_capo = Alignment(vertical="top", wrap_text=True)
         for r in righe:
             ws.append([val(r.get(c)) for c in colonne])
+            for cell in ws[ws.max_row]:
+                if isinstance(cell.value, str) and "\n" in cell.value:
+                    cell.alignment = a_capo
         if "url" in colonne:
             ci = colonne.index("url") + 1
             for row in ws.iter_rows(min_row=2, min_col=ci, max_col=ci):
@@ -361,7 +420,7 @@ input{{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:
 .wrap{{overflow:auto;margin:0 16px 16px;border:1px solid var(--line);border-radius:8px;background:var(--card);max-height:calc(100vh - 140px)}}
 table{{border-collapse:collapse;width:max-content;min-width:100%}}
 th{{position:sticky;top:0;background:var(--head);color:var(--headfg);text-align:left;padding:8px;cursor:pointer;white-space:nowrap;user-select:none}}
-td{{padding:6px 8px;border-top:1px solid var(--line);vertical-align:top;max-width:340px}}
+td{{padding:6px 8px;border-top:1px solid var(--line);vertical-align:top;max-width:340px;white-space:pre-line}}
 tr:hover td{{background:var(--hi)}} a{{color:#2f7fd8}}
 </style></head><body>
 <header><h1>{html.escape(titolo)}</h1><div class="sub">{html.escape(sottotitolo)}</div></header>
