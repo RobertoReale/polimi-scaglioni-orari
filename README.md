@@ -53,8 +53,15 @@ Se manca una scelta, il programma lo segnala prima di partire. Nulla viene scelt
    |---|---|
    | Insegnamenti | ogni insegnamento di ogni piano: periodo, CFU, n. scaglioni, docenti |
    | Scaglioni | ogni scaglione con il suo orario settimanale: una colonna per giorno (Lunedì…Sabato, es. `15:15–18:15 aula 7.1.3`), le aule con l'edificio, il periodo delle lezioni, docenti, moduli |
+   | Orario per cognome | ogni fascia di cognomi di un piano: l'orario settimanale completo, con **tutti** gli insegnamenti, di chi ha il cognome in quella fascia (es. `BRU – CON`: Analisi, Informatica e Geometria insieme) |
    | Lezioni (orario) | ogni lezione settimanale: giorno, ora di inizio e fine, aula ed edificio, date |
    | Corsi e piani | ogni piano di studio, compresi quelli scartati perché di un'altra sede |
+
+   Perché "Scaglioni" ha più righe con le stesse lettere? Perché ogni insegnamento ha i suoi scaglioni:
+   `BRU – CON` di Analisi e `BRU – CON` di Geometria sono due righe. **Orario per cognome** li mette insieme.
+   Quando gli insegnamenti dividono i cognomi in modo diverso (uno A–M e M–Z, un altro A–E, E–P, P–Z), le
+   fasce sono tutti gli intervalli tra i confini (A–E, E–M, M–P, P–Z), ognuna con lo scaglione giusto di ogni
+   insegnamento.
 
    Negli insegnamenti annuali con orari diversi nei due semestri, accanto a ogni lezione della tabella
    Scaglioni ci sono le date in cui vale, es. `09:15–13:15 aula G.3 [24/02→26/05]`.
@@ -71,7 +78,7 @@ Se manca una scelta, il programma lo segnala prima di partire. Nulla viene scelt
    - **Excel**, **CSV** (si apre direttamente in Excel), **pagina web** con ricerca e ordinamento, **JSON**;
    - **Excel con tutte le tabelle**: un foglio per ogni tabella, con gli stessi filtri applicati;
    - **Orario settimanale**: una pagina con le griglie Lunedì–Venerdì. Puoi raggrupparle per scaglione,
-     per insegnamento, per piano, per aula o per docente. Si stampa o si salva in PDF dal browser.
+     per fascia di cognomi (l'orario completo di uno studente), per insegnamento, per piano, per aula o per docente. Si stampa o si salva in PDF dal browser.
 
    Le pagine web esportate usano sempre il tema chiaro, anche se il computer è in modalità scura.
 
@@ -86,6 +93,7 @@ python scarica_manifesti.py --sede MI --ordinamento 96/23 --anni-corso 1 --perio
 python scarica_manifesti.py --corsi 531 --piani primo --no-orari --paralleli 2
 python esporta.py output/FILE.json --tabella scaglioni --formato xlsx --filtro corso_codice=531
 python esporta.py output/FILE.json --calendario scaglione --filtro piano_codice=IT1
+python esporta.py output/FILE.json --calendario cognome --filtro corso_codice=531
 python esporta.py output/FILE.json --tutte --formato xlsx
 ```
 Ogni script mostra le opzioni disponibili con `--help`.

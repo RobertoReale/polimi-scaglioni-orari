@@ -552,7 +552,7 @@ FILTRI = [
     ("aula", "Aula"),
     ("docenti", "Docente"),
 ]
-NOMI_TABELLE = {"insegnamenti": "Insegnamenti", "scaglioni": "Scaglioni",
+NOMI_TABELLE = {"insegnamenti": "Insegnamenti", "scaglioni": "Scaglioni", "cognomi": "Orario per cognome",
                 "lezioni": "Lezioni (orario)", "piani": "Corsi e piani"}
 
 

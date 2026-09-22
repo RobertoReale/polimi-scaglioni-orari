@@ -4,7 +4,8 @@ Esportazione dei dati scaricati (file JSON in output/) in tabelle leggibili.
 
 Tabelle disponibili:
     insegnamenti   una riga per insegnamento di ogni piano (con n. scaglioni, docenti)
-    scaglioni      una riga per scaglione (con docenti, moduli e sintesi dell'orario)
+    scaglioni      una riga per scaglione di ogni insegnamento (orario: una colonna per giorno)
+    cognomi        una riga per fascia di cognomi di ogni piano: orario con tutti gli insegnamenti
     lezioni        una riga per lezione settimanale (giorno, ora, aula, date)
     piani          una riga per corso/piano di studio (anche quelli scartati)
 
@@ -15,6 +16,7 @@ Uso da terminale, esempi:
     python esporta.py output/manifesti.json --tabella scaglioni --formato xlsx
     python esporta.py output/manifesti.json --tabella lezioni --filtro corso_codice=531 --cerca analisi
     python esporta.py output/manifesti.json --calendario scaglione --filtro piano_codice=IT1
+    python esporta.py output/manifesti.json --calendario cognome --filtro corso_codice=531
     python esporta.py output/manifesti.json --tutte --formato xlsx      (un foglio per tabella)
 """
 import argparse
@@ -49,6 +51,7 @@ LABELS = {
     "semestre": "Semestre", "periodo_orario": "Periodo orario",
     "stato": "Stato", "n_insegnamenti_totali": "Insegnamenti nel piano", "n_insegnamenti": "Insegnamenti scaricati",
     "piani": "Piani", "corsi": "Corsi", "periodo_lezioni": "Periodo lezioni",
+    "insegnamenti_scaglioni": "Insegnamenti: scaglione di ciascuno",
     "lun": "Lunedì", "mar": "Martedì", "mer": "Mercoledì", "gio": "Giovedì", "ven": "Venerdì", "sab": "Sabato",
 }
 
@@ -65,6 +68,8 @@ COLONNE = {
     "scaglioni": _TESTA + ["codice", "insegnamento", "periodo", "cfu", "scaglione", "lun", "mar", "mer", "gio", "ven",
                            "sab", "aule", "periodo_lezioni", "docenti", "ore_settimanali", "n_lezioni", "orario",
                            "moduli", "da", "a", "sezione", "url"] + _CODA,
+    "cognomi": _TESTA + ["anno_corso", "scaglione", "lun", "mar", "mer", "gio", "ven", "sab",
+                         "insegnamenti_scaglioni", "aule", "periodo_lezioni", "ore_settimanali", "n_lezioni"] + _CODA,
     "lezioni": _TESTA + ["codice", "insegnamento", "periodo", "scaglione", "giorno", "inizio", "fine", "aula",
                          "edificio", "docenti", "attivita", "dal", "al", "durata_min", "n_date", "date_lezioni",
                          "periodo_orario", "giorno_n", "da", "a", "url"] + _CODA,
@@ -75,6 +80,7 @@ COLONNE = {
 DESCRIZIONI = {
     "insegnamenti": "Una riga per insegnamento di ogni piano: periodo, CFU, n. scaglioni, docenti",
     "scaglioni": "Una riga per scaglione: lettere da/a, docenti e il suo orario settimanale (una colonna per giorno, con le aule)",
+    "cognomi": "Una riga per fascia di cognomi: orario completo con tutti gli insegnamenti del piano",
     "lezioni": "Una riga per lezione settimanale: giorno, ora, aula, date",
     "piani": "Una riga per corso e piano di studi (anche quelli scartati perché di altre sedi)",
 }
@@ -178,8 +184,23 @@ def _edificio(descr):
     return f"Ed. {m.group(1)}" if m else ""
 
 
-def _giorni_scaglione(lezioni):
-    """{'lun': '08:15–10:15 aula 2.1.4', ...}: l'orario dello scaglione, una colonna per giorno."""
+def _aule(lezioni):
+    """'7.1.3 (Ed. 7), T.2.1 (Ed. 13)'"""
+    aule = []
+    for lz in _ordina_lezioni(lezioni):
+        if lz.get("aula"):
+            ed = _edificio(lz.get("aula_descrizione") or lz.get("edificio"))
+            aule.append(f"{lz['aula']} ({ed})" if ed else lz["aula"])
+    return ", ".join(dict.fromkeys(aule))
+
+
+def _ore(lezioni):
+    return _num(round(sum(lz.get("durata_min") or 0 for lz in lezioni) / 60, 2))
+
+
+def _giorni_scaglione(lezioni, con_nome=False):
+    """{'lun': '08:15–10:15 aula 2.1.4', ...}: l'orario dello scaglione, una colonna per giorno.
+    con_nome: davanti all'aula anche l'insegnamento (orario di più insegnamenti insieme)."""
     periodi = [(_data(lz.get("dal")), _data(lz.get("al"))) for lz in lezioni]
     periodi = [p for p in periodi if p[0] and p[1]]
     # corsi annuali: orari diversi nei due semestri -> accanto a ogni lezione le sue date
@@ -191,14 +212,47 @@ def _giorni_scaglione(lezioni):
         if not col:
             continue
         testo = f"{lz.get('inizio')}–{lz.get('fine')}"
-        if lz.get("aula"):
-            testo += f" aula {lz['aula']}"
+        if con_nome:
+            testo += f" {lz.get('insegnamento')}"
         attivita = re.sub(r"\s*\[sez\..*?\]\s*$", "", lz.get("attivita") or "").strip()
         if attivita and attivita != lz.get("insegnamento"):
             testo += f" ({attivita})"
+        if lz.get("aula"):
+            testo += f" · aula {lz['aula']}" if con_nome else f" aula {lz['aula']}"
         if con_date and lz.get("dal"):
             testo += f" [{lz['dal'][:5]}→{(lz.get('al') or '')[:5]}]"
         out[col] = f"{out[col]}\n{testo}" if col in out else testo  # una lezione per riga nella cella
+    return out
+
+
+_FINE = "￿"  # dopo qualunque cognome
+
+
+def _da(v):
+    v = (v or "").strip().upper()
+    return "" if v in ("", "A") else v
+
+
+def _a(v):
+    v = (v or "").strip().upper()
+    return _FINE if not v or set(v) == {"Z"} else v
+
+
+def gruppi_cognomi(lezioni):
+    """Orario di chi ha il cognome in una certa fascia, con tutti gli insegnamenti del piano.
+    Ogni insegnamento divide i cognomi a modo suo (Analisi A–BRU, BRU–CON…; un altro A–M, M–Z):
+    le fasce sono gli intervalli tra tutti i confini, e per ogni fascia si prende da ogni insegnamento
+    lo scaglione che la contiene. Restituisce [((corso_codice, piano_codice, anno), nome_fascia, lezioni)]."""
+    piani = {}
+    for lz in lezioni:
+        piani.setdefault((lz.get("corso_codice"), lz.get("piano_codice"), lz.get("anno_corso")), []).append(lz)
+    out = []
+    for k, lz_p in piani.items():
+        confini = sorted({"", _FINE} | {_da(lz.get("da")) for lz in lz_p} | {_a(lz.get("a")) for lz in lz_p})
+        for lo, hi in zip(confini, confini[1:]):
+            sel = [lz for lz in lz_p if _da(lz.get("da")) <= lo and hi <= _a(lz.get("a"))]
+            if sel:
+                out.append((k, _nome_scaglione(lo or "A", "ZZZZ" if hi == _FINE else hi), sel))
     return out
 
 
@@ -244,11 +298,9 @@ def tabelle(dati):
                             **base, "sezione": sez.get("id_sezione"), "scaglione": nome_sc,
                             "da": sc.get("da"), "a": sc.get("a"), "docenti": _lista(sc.get("docenti")),
                             "moduli": "; ".join(dict.fromkeys(moduli)), "n_lezioni": len(lez_sc),
-                            "ore_settimanali": _num(round(sum(lz.get("durata_min") or 0 for lz in lez_sc) / 60, 2)),
+                            "ore_settimanali": _ore(lez_sc),
                             "orario": _sintesi_orario(lez_sc) or _nota_chiara(sez.get("orario_nota")),
-                            "aule": ", ".join(dict.fromkeys(
-                                f"{lz['aula']} ({_edificio(lz.get('aula_descrizione'))})" if _edificio(lz.get("aula_descrizione"))
-                                else lz["aula"] for lz in _ordina_lezioni(lez_sc) if lz.get("aula"))),
+                            "aule": _aule(lez_sc),
                             "periodo_lezioni": _periodo_lezioni(lez_sc), **_giorni_scaglione(lez_sc),
                         })
                     doc_sc = {(sc.get("da"), sc.get("a")): _lista(sc.get("docenti")) for sc in sez.get("scaglioni", [])}
@@ -263,7 +315,7 @@ def tabelle(dati):
                             "aula": lz.get("aula"), "edificio": lz.get("aula_descrizione"),
                             "attivita": lz.get("attivita"), "dal": lz.get("dal"), "al": lz.get("al"),
                             "n_date": len(date) or None, "date_lezioni": ", ".join(date),
-                            "periodo_orario": lz.get("periodo_orario"),
+                            "periodo_orario": lz.get("periodo_orario"), "anno_corso": _num(ins.get("anno_corso")),
                         })
                 if ins.get("errore"):
                     nota = f"non letto per un errore: {ins['errore']}"[:500]
@@ -286,6 +338,14 @@ def tabelle(dati):
             stato = (f"non letto per un errore: {corso['errore']}" if corso.get("errore")
                      else "; ".join(corso.get("note", [])) or corso.get("nota") or "nessun piano")
             out["piani"].append({**ctx, "stato": stato})
+    for (_, _, anno), nome, sel in gruppi_cognomi(out["lezioni"]):
+        out["cognomi"].append({
+            **{c: sel[0].get(c) for c in CONTESTO}, "anno_corso": anno, "scaglione": nome,
+            **_giorni_scaglione(sel, con_nome=True), "aule": _aule(sel), "periodo_lezioni": _periodo_lezioni(sel),
+            "insegnamenti_scaglioni": "\n".join(dict.fromkeys(f"{lz.get('insegnamento')}: {lz.get('scaglione')}"
+                                                              for lz in sorted(sel, key=lambda x: x.get("insegnamento") or ""))),
+            "ore_settimanali": _ore(sel), "n_lezioni": len(sel),
+        })
     return out
 
 
@@ -448,6 +508,7 @@ document.getElementById('q').oninput=draw;draw();
 
 RAGGRUPPA = {
     "scaglione": "Un orario per ogni insegnamento e scaglione",
+    "cognome": "Un orario per fascia di cognomi (tutti gli insegnamenti del piano)",
     "insegnamento": "Un orario per insegnamento (tutti gli scaglioni insieme)",
     "piano": "Un orario per piano di studi (tutte le lezioni del piano)",
     "aula": "Un orario per aula",
@@ -469,6 +530,16 @@ def _min(hhmm):
 
 
 def _gruppi_calendario(lezioni, per):
+    if per == "cognome":
+        # stesso orario in più corsi (insegnamenti comuni) -> una sola griglia con tutti i corsi nel titolo
+        per_contenuto = {}
+        for (cc, pc, anno), nome, sel in gruppi_cognomi(lezioni):
+            firma = frozenset((lz.get("codice"), lz.get("giorno_n"), lz.get("inizio"), lz.get("aula"), lz.get("dal"))
+                              for lz in sel)
+            g = per_contenuto.setdefault(firma, {"nome": nome, "piani": [], "lezioni": sel})
+            g["piani"].append(f"{cc}/{pc}" + (f" anno {anno}" if anno not in (None, "") else ""))
+        return {f"{', '.join(dict.fromkeys(g['piani']))} · cognomi {g['nome']}": g["lezioni"]
+                for g in per_contenuto.values()}
     gruppi = {}
     for lz in lezioni:
         if per == "scaglione":
