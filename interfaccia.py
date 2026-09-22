@@ -272,6 +272,15 @@ class SchedaScarica(ttk.Frame):
         self._riempi_albero()
 
     # ---------------------------------------------------------------- albero
+    def _selezione_effettiva(self):
+        """Corsi selezionati che rispettano il «Tipo di laurea» scelto: sono quelli che verranno scaricati.
+        (La casella «Cerca» invece non esclude nulla: serve solo a trovare i corsi.)"""
+        if not self.catalogo:
+            return set()
+        tipo = self.cb_tipo.get()
+        return {c["codice"] for s in self.catalogo["scuole"] for c in s["corsi"]
+                if c["codice"] in self.selezionati and (tipo == TUTTI_TIPI or tipo_laurea(c["gruppo"]) == tipo)}
+
     def _corsi_visibili(self):
         if not self.catalogo:
             return []
@@ -326,8 +335,12 @@ class SchedaScarica(ttk.Frame):
             if testo[:1] in (ON, OFF, MEZZO):
                 testo = testo[2:]
             self.tree.item(iid, text=f"{simbolo} {testo}")
-        n = len(self.selezionati)
-        self.lbl_sel.config(text=f"{n} corsi selezionati" if n else "Nessun corso selezionato")
+        n = len(self._selezione_effettiva())
+        esclusi = len(self.selezionati) - n
+        testo = f"{n} corsi selezionati" if n else "Nessun corso selezionato"
+        if esclusi:
+            testo += f" (altri {esclusi} spuntati ma di un altro tipo di laurea: non verranno scaricati)"
+        self.lbl_sel.config(text=testo)
 
     def _clic_albero(self, event):
         if event.type == tk.EventType.KeyPress:
@@ -399,7 +412,8 @@ class SchedaScarica(ttk.Frame):
             errori.append("• scegli l'anno accademico")
         if not sede:
             errori.append("• scegli la sede")
-        if not self.selezionati or not self.catalogo:
+        corsi = self._selezione_effettiva()
+        if not corsi:
             errori.append("• seleziona almeno un corso di studio (attendi che l'elenco sia caricato)")
         anni = ["0"] if self.var_anni_tutti.get() else [a for a, v in self.var_anni.items() if v.get()]
         if not anni:
@@ -421,9 +435,9 @@ class SchedaScarica(ttk.Frame):
         except (tk.TclError, ValueError):
             paralleli = ps.PARALLELI_DEFAULT
         scuole = sorted({s["codice"] for s in self.catalogo["scuole"]
-                         for c in s["corsi"] if c["codice"] in self.selezionati})
+                         for c in s["corsi"] if c["codice"] in corsi})
         return ps.Opzioni(
-            aa=aa, sede=sede, scuole=scuole, corsi=sorted(self.selezionati),
+            aa=aa, sede=sede, scuole=scuole, corsi=sorted(corsi),
             anni_corso=anni, piani=self.var_piani.get(),
             includi_non_diversificato=self.var_nondiv.get(), includi_altre_sedi=self.var_altre_sedi.get(),
             periodi=None if len(periodi) == len(ps.PERIODI) else periodi,
