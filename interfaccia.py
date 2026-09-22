@@ -5,13 +5,17 @@ Avvio: avvia.bat (Windows), ./avvia.sh (Linux/macOS) oppure  python avvia.py
 """
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from tkinter import font as tkfont
 from tkinter.scrolledtext import ScrolledText
 
 import esporta as ex
@@ -21,6 +25,12 @@ HERE = Path(__file__).resolve().parent
 OUTPUT = HERE / "output"
 CACHE = HERE / "cache"
 VUOTO = "— scegli —"
+TUTTI_TIPI = "Tutti i tipi"
+
+
+def tipo_laurea(gruppo):
+    """'Laurea Magistrale - ord. 96/23' -> 'Laurea Magistrale' (il tipo senza l'ordinamento)."""
+    return re.split(r"\s+-\s+ord\b", gruppo or "", maxsplit=1, flags=re.I)[0].strip() or "Altro"
 TUTTI = "(tutti)"
 ON, OFF, MEZZO = "☑", "☐", "◩"
 MAX_ANTEPRIMA = 3000
@@ -52,10 +62,13 @@ class SchedaScarica(ttk.Frame):
         super().__init__(parent, padding=10)
         self.app = app
         self.catalogo = None
+        self.map_aa, self.map_sede = {}, {}
+        self.n_richiesta_corsi = 0    # solo l'ultima richiesta del catalogo conta
         self.selezionati = set()      # codici corso selezionati
         self.q = queue.Queue()
         self.stop = threading.Event()
         self.lavoro = None
+        self._fase, self._t0, self._n0 = None, 0.0, 0  # per la stima del tempo rimanente
         self._costruisci()
         self._carica_opzioni_iniziali()
         self.after(100, self._svuota_coda)
@@ -75,13 +88,14 @@ class SchedaScarica(ttk.Frame):
         ttk.Label(s1, text="Sede").grid(row=0, column=2, sticky="w")
         self.cb_sede = ttk.Combobox(s1, state="readonly", width=26, values=[VUOTO])
         self.cb_sede.grid(row=0, column=3, padx=(6, 18))
-        ttk.Label(s1, text="Lingua del sito").grid(row=0, column=4, sticky="w")
-        self.cb_lang = ttk.Combobox(s1, state="readonly", width=12, values=["Italiano", "English"])
-        self.cb_lang.set("Italiano")
-        self.cb_lang.grid(row=0, column=5, padx=(6, 18))
+        ttk.Label(s1, text="Tipo di laurea").grid(row=0, column=4, sticky="w")
+        self.cb_tipo = ttk.Combobox(s1, state="readonly", width=30, values=[TUTTI_TIPI])
+        self.cb_tipo.set(TUTTI_TIPI)
+        self.cb_tipo.grid(row=0, column=5, padx=(6, 18))
+        self.cb_tipo.bind("<<ComboboxSelected>>", lambda e: self._riempi_albero())
         self.lbl_stato = ttk.Label(s1, text="Collegamento al sito…", foreground="#666")
         self.lbl_stato.grid(row=0, column=6, sticky="w")
-        for cb in (self.cb_aa, self.cb_sede, self.cb_lang):
+        for cb in (self.cb_aa, self.cb_sede):
             cb.bind("<<ComboboxSelected>>", lambda e: self._carica_corsi())
 
         # ② corsi
@@ -168,6 +182,9 @@ class SchedaScarica(ttk.Frame):
         ttk.Label(f, text="Pausa tra le richieste (secondi)").grid(row=0, column=0)
         self.var_delay = tk.DoubleVar(value=0.4)
         ttk.Spinbox(f, from_=0.1, to=5, increment=0.1, width=5, textvariable=self.var_delay).grid(row=0, column=1, padx=6)
+        ttk.Label(f, text="Richieste in parallelo").grid(row=0, column=2, padx=(10, 0))
+        self.var_paralleli = tk.IntVar(value=ps.PARALLELI_DEFAULT)
+        ttk.Spinbox(f, from_=1, to=8, increment=1, width=4, textvariable=self.var_paralleli).grid(row=0, column=3, padx=6)
         self.lbl_cache = ttk.Label(s3, foreground="#666")
         self.lbl_cache.grid(row=r, column=0, sticky="w"); r += 1
         self._aggiorna_info_cache()
@@ -187,7 +204,7 @@ class SchedaScarica(ttk.Frame):
         self.btn_avvia.grid(row=0, column=0, ipadx=10, ipady=3)
         self.btn_stop = ttk.Button(f, text="■  Interrompi", command=self._interrompi, state="disabled")
         self.btn_stop.grid(row=0, column=1, padx=8)
-        self.lbl_prog = ttk.Label(f, text="", width=34)
+        self.lbl_prog = ttk.Label(f, text="", width=58)
         self.lbl_prog.grid(row=0, column=2, padx=8)
         self.pbar = ttk.Progressbar(f, mode="determinate")
         self.pbar.grid(row=0, column=3, sticky="ew")
@@ -204,9 +221,6 @@ class SchedaScarica(ttk.Frame):
             except Exception as e:
                 self.q.put(("fine", fine, None, e))
         threading.Thread(target=run, daemon=True).start()
-
-    def _lang(self):
-        return "EN" if self.cb_lang.get() == "English" else "IT"
 
     def _carica_opzioni_iniziali(self):
         def f():
@@ -233,16 +247,24 @@ class SchedaScarica(ttk.Frame):
         if not (aa and sede):
             return
         self.lbl_stato.config(text="Carico l'elenco dei corsi…", foreground="#666")
-        self.tree.delete(*self.tree.get_children())
-        lang = self._lang()
-        self._in_thread(lambda: ps.catalogo(aa, sede, lang), self._corsi_caricati)
+        self.catalogo = None
+        self._riempi_albero()
+        self.n_richiesta_corsi += 1
+        n = self.n_richiesta_corsi
+        self._in_thread(lambda: ps.catalogo(aa, sede), lambda cat, err: self._corsi_caricati(cat, err, n))
 
-    def _corsi_caricati(self, cat, err):
+    def _corsi_caricati(self, cat, err, n_richiesta):
+        if n_richiesta != self.n_richiesta_corsi:
+            return  # nel frattempo l'utente ha cambiato anno o sede
         if err:
             self.lbl_stato.config(text="Errore nel caricare i corsi", foreground="#b00020")
             messagebox.showerror("Errore", str(err))
             return
         self.catalogo = cat
+        tipi = sorted({tipo_laurea(c["gruppo"]) for s in cat["scuole"] for c in s["corsi"]})
+        self.cb_tipo.config(values=[TUTTI_TIPI] + tipi)
+        if self.cb_tipo.get() not in tipi:
+            self.cb_tipo.set(TUTTI_TIPI)
         validi = {c["codice"] for s in cat["scuole"] for c in s["corsi"]}
         self.selezionati &= validi
         n = len(validi)
@@ -254,9 +276,12 @@ class SchedaScarica(ttk.Frame):
         if not self.catalogo:
             return []
         parole = self.var_cerca.get().lower().split()
+        tipo = self.cb_tipo.get()
         out = []
         for s in self.catalogo["scuole"]:
             for c in s["corsi"]:
+                if tipo != TUTTI_TIPI and tipo_laurea(c["gruppo"]) != tipo:
+                    continue
                 testo = f"{s['nome']} {c['gruppo']} {c['nome']} {c['codice']}".lower()
                 if all(p in testo for p in parole):
                     out.append((s, c))
@@ -266,7 +291,7 @@ class SchedaScarica(ttk.Frame):
         aperti = {self.tree.item(i, "text")[2:] for i in self._tutti_nodi() if self.tree.item(i, "open")}
         self.tree.delete(*self.tree.get_children())
         self.nodi = {}  # iid -> set di codici corso sotto il nodo
-        filtro = bool(self.var_cerca.get().strip())
+        filtro = bool(self.var_cerca.get().strip()) or self.cb_tipo.get() != TUTTI_TIPI
         for s, c in self._corsi_visibili():
             sid = f"s{s['codice']}"
             if not self.tree.exists(sid):
@@ -352,7 +377,8 @@ class SchedaScarica(ttk.Frame):
         self.lbl_cache.config(text=f"Cache: {n} pagine salvate ({mb:.0f} MB). Svuotala per avere dati aggiornati.")
 
     def _svuota_cache(self):
-        if self.lavoro and self.lavoro.is_alive():
+        if self.in_corso():
+            messagebox.showinfo("Svuota cache", "Attendi la fine dello scaricamento in corso.")
             return
         if messagebox.askyesno("Svuota cache", "Cancellare le pagine salvate?\n"
                                "Il prossimo scaricamento rileggerà tutto dal sito (più lento, ma aggiornato)."):
@@ -368,14 +394,13 @@ class SchedaScarica(ttk.Frame):
 
     def _opzioni(self):
         errori = []
-        aa, sede = self.map_aa.get(self.cb_aa.get()) if hasattr(self, "map_aa") else None, \
-            self.map_sede.get(self.cb_sede.get()) if hasattr(self, "map_sede") else None
+        aa, sede = self.map_aa.get(self.cb_aa.get()), self.map_sede.get(self.cb_sede.get())
         if not aa:
             errori.append("• scegli l'anno accademico")
         if not sede:
             errori.append("• scegli la sede")
-        if not self.selezionati:
-            errori.append("• seleziona almeno un corso di studio")
+        if not self.selezionati or not self.catalogo:
+            errori.append("• seleziona almeno un corso di studio (attendi che l'elenco sia caricato)")
         anni = ["0"] if self.var_anni_tutti.get() else [a for a, v in self.var_anni.items() if v.get()]
         if not anni:
             errori.append("• scegli almeno un anno di corso (o «Tutti insieme»)")
@@ -391,15 +416,19 @@ class SchedaScarica(ttk.Frame):
             delay = max(0.1, float(self.var_delay.get()))
         except (tk.TclError, ValueError):
             delay = 0.4
+        try:
+            paralleli = min(8, max(1, int(self.var_paralleli.get())))
+        except (tk.TclError, ValueError):
+            paralleli = ps.PARALLELI_DEFAULT
         scuole = sorted({s["codice"] for s in self.catalogo["scuole"]
                          for c in s["corsi"] if c["codice"] in self.selezionati})
         return ps.Opzioni(
-            aa=aa, sede=sede, lang=self._lang(), scuole=scuole, corsi=sorted(self.selezionati),
+            aa=aa, sede=sede, scuole=scuole, corsi=sorted(self.selezionati),
             anni_corso=anni, piani=self.var_piani.get(),
             includi_non_diversificato=self.var_nondiv.get(), includi_altre_sedi=self.var_altre_sedi.get(),
             periodi=None if len(periodi) == len(ps.PERIODI) else periodi,
             scaglioni=self.var_scaglioni.get(), orari=self.var_orari.get(),
-            out=self.var_out.get().strip() or None, delay=delay,
+            out=self.var_out.get().strip() or None, delay=delay, paralleli=paralleli,
             cache=str(CACHE) if self.var_cache.get() else "")
 
     # ---------------------------------------------------------------- esecuzione
@@ -422,6 +451,8 @@ class SchedaScarica(ttk.Frame):
         self.btn_avvia.config(state="disabled")
         self.btn_stop.config(state="normal")
         self.pbar.config(value=0, maximum=1)
+        self.lbl_prog.config(text="Avvio…")
+        self._fase = None
 
         def run():
             try:
@@ -445,9 +476,7 @@ class SchedaScarica(ttk.Frame):
                 if m[0] == "log":
                     self._scrivi_log(m[1])
                 elif m[0] == "prog":
-                    _, fase, n, t = m
-                    self.pbar.config(maximum=max(t, 1), value=n)
-                    self.lbl_prog.config(text=f"{fase}: {n}/{t}")
+                    self._avanzamento(*m[1:])
                 elif m[0] == "fine":
                     _, callback, res, err = m
                     callback(res, err)
@@ -457,19 +486,58 @@ class SchedaScarica(ttk.Frame):
             pass
         self.after(100, self._svuota_coda)
 
+    def _avanzamento(self, fase, n, t):
+        if fase != self._fase:  # nuova fase: riparte la stima del tempo
+            self._fase, self._t0, self._n0 = fase, time.monotonic(), n
+        self.pbar.config(maximum=max(t, 1), value=n)
+        testo = f"{fase}: {n}/{t}"
+        fatti, trascorso = n - self._n0, time.monotonic() - self._t0
+        if fatti >= 5 and trascorso > 3 and n < t:
+            resto = trascorso / fatti * (t - n)
+            testo += f" · circa {_durata(resto)} alla fine della fase"
+        self.lbl_prog.config(text=testo)
+
     def _finito(self, out, err):
+        if self.app.chiusura_richiesta:  # l'utente ha chiuso la finestra: dati già salvati
+            self.app.destroy()
+            return
         self.btn_avvia.config(state="normal")
         self.btn_stop.config(state="disabled")
         self._aggiorna_info_cache()
         if err:
+            self.lbl_prog.config(text="Errore: nessun dato salvato")
             self._scrivi_log(f"\nERRORE: {err!r}")
-            messagebox.showerror("Errore", f"Lo scaricamento si è fermato:\n\n{err}")
+            messagebox.showerror("Errore", f"Lo scaricamento non è partito:\n\n{err}")
             return
-        self.lbl_prog.config(text="Completato" if not self.stop.is_set() else "Interrotto (dati parziali salvati)")
         self.app.esplora.aggiorna_elenco(select=out)
-        if messagebox.askyesno("Scaricamento terminato",
-                               f"Dati salvati in:\n{out}\n\nVuoi esplorarli ed esportarli adesso?"):
+        meta = (self.app.esplora.dati or {}).get("meta", {})
+        r = meta.get("riepilogo") or {}
+        conteggi = (f"{r.get('corsi', 0)} corsi, {r.get('piani', 0)} piani di studio\n"
+                    f"{r.get('insegnamenti', 0)} insegnamenti, {r.get('scaglioni', 0)} scaglioni, "
+                    f"{r.get('lezioni_settimanali', 0)} lezioni settimanali")
+        if r.get("insegnamenti_con_errore"):
+            conteggi += (f"\n\n{r['insegnamenti_con_errore']} insegnamenti non sono stati letti per un errore "
+                         "(li trovi nella colonna «Note»): puoi rilanciare lo scaricamento, "
+                         "quelli già letti verranno presi dalla cache.")
+        if meta.get("errore"):
+            self.lbl_prog.config(text="Fermato da un errore (dati parziali salvati)")
+            titolo, icona = "Scaricamento incompleto", "warning"
+            testo = (f"Lo scaricamento si è fermato per un errore:\n{meta['errore']}\n\n"
+                     f"Dati raccolti fino a quel punto:\n{conteggi}")
+        elif meta.get("interrotto") or self.stop.is_set():
+            self.lbl_prog.config(text="Interrotto (dati parziali salvati)")
+            titolo, icona = "Scaricamento interrotto", "info"
+            testo = f"Dati raccolti fino all'interruzione:\n{conteggi}"
+        else:
+            self.lbl_prog.config(text="Completato")
+            titolo, icona = "Scaricamento completato", "info"
+            testo = conteggi
+        if messagebox.askyesno(titolo, f"{testo}\n\nSalvati in:\n{out}\n\nVuoi esplorarli ed esportarli adesso?",
+                               icon=icona):
             self.app.nb.select(self.app.esplora)
+
+    def in_corso(self):
+        return self.lavoro is not None and self.lavoro.is_alive()
 
 
 # ============================================================ scheda 2: esplora
@@ -550,7 +618,7 @@ class SchedaEsplora(ttk.Frame):
         self._timer = None
         self.var_cerca.trace_add("write", lambda *a: self._rinvia_aggiornamento())
         self.var_unisci = tk.BooleanVar()
-        ttk.Checkbutton(f, text="Unisci lo stesso insegnamento presente in più piani", variable=self.var_unisci,
+        ttk.Checkbutton(f, text="Una riga sola per ciò che si ripete in più corsi (unisce i doppioni)", variable=self.var_unisci,
                         command=self._aggiorna_anteprima).grid(row=0, column=2, padx=8)
         ttk.Button(f, text="Colonne…", command=self._scegli_colonne).grid(row=0, column=3)
         ttk.Button(f, text="Azzera filtri", command=self._azzera_filtri).grid(row=0, column=4, padx=(6, 0))
@@ -567,6 +635,7 @@ class SchedaEsplora(ttk.Frame):
         ys.grid(row=0, column=1, sticky="ns")
         xs.grid(row=1, column=0, sticky="ew")
         self.tree.bind("<Double-1>", self._dettaglio_riga)
+        self.tree.tag_configure("alt", background="#f2f5f9")  # righe alternate, più facili da seguire
         self.lbl_n = ttk.Label(s3, text="")
         self.lbl_n.grid(row=2, column=0, sticky="w", pady=(4, 0))
 
@@ -616,6 +685,9 @@ class SchedaEsplora(ttk.Frame):
             self.dati = ex.carica(p)
             self.tab = ex.tabelle(self.dati)
         except Exception as e:
+            self.dati, self.tab, self.righe = None, {}, []
+            self.tree.delete(*self.tree.get_children())
+            self.lbl_file.config(text="Il file scelto non è leggibile.")
             messagebox.showerror("File non valido", f"{p}\n\n{e}")
             return
         n = {k: len(v) for k, v in self.tab.items()}
@@ -690,7 +762,8 @@ class SchedaEsplora(ttk.Frame):
             self.after_cancel(self._timer)
         self._timer = self.after(300, self._aggiorna_anteprima)
 
-    def _righe_filtrate(self, tabella=None):
+    def _righe_filtrate(self, tabella=None, completo=False):
+        """Colonne e righe da mostrare/salvare. completo=True: righe intere, senza unire i duplicati."""
         t = tabella or self.var_tab.get()
         cols = self.colonne_scelte.get(t, ex.COLONNE[t])
         if tabella and tabella != self.var_tab.get():
@@ -706,7 +779,7 @@ class SchedaEsplora(ttk.Frame):
         else:
             righe = self._righe_base()
         righe = ex.filtra(righe, None, self.var_cerca.get())
-        if self.var_unisci.get():
+        if self.var_unisci.get() and not completo:
             righe = ex.unisci_duplicati(righe, cols)
         return cols, righe
 
@@ -727,8 +800,9 @@ class SchedaEsplora(ttk.Frame):
             self.tree.heading(c, text=ex.label(c) + freccia, command=lambda c=c: self._ordina(c))
             lung = max([len(ex.label(c))] + [len(str(r.get(c) or "")) for r in righe[:200]])
             self.tree.column(c, width=min(max(lung * 8 + 16, 60), 400), stretch=False)
-        for r in righe[:MAX_ANTEPRIMA]:
-            self.tree.insert("", "end", values=["" if r.get(c) is None else r.get(c) for c in cols])
+        for n, r in enumerate(righe[:MAX_ANTEPRIMA]):
+            self.tree.insert("", "end", values=["" if r.get(c) is None else r.get(c) for c in cols],
+                             tags=("alt",) if n % 2 else ())
         extra = f" (nell'anteprima le prime {MAX_ANTEPRIMA}; il salvataggio le include tutte)" if len(righe) > MAX_ANTEPRIMA else ""
         self.lbl_n.config(text=f"{len(righe)} righe{extra}. Doppio clic su una riga per vederla per intero.")
 
@@ -755,7 +829,7 @@ class SchedaEsplora(ttk.Frame):
         url = riga.get("url")
         if url and str(url).startswith("http") and " | " not in str(url):
             ttk.Button(w, text="Apri la pagina sul sito del PoliMi",
-                       command=lambda: __import__("webbrowser").open(url)).pack(pady=6)
+                       command=lambda: webbrowser.open(url)).pack(pady=6)
 
     def _scegli_colonne(self):
         t = self.var_tab.get()
@@ -815,7 +889,21 @@ class SchedaEsplora(ttk.Frame):
         return filedialog.asksaveasfilename(initialdir=cartella, initialfile=nome, defaultextension=f".{ext}",
                                             filetypes=[(descr, f"*.{ext}")])
 
-    def _salvato(self, path, testo):
+    def _salva(self, path, scrivi, testo):
+        """Esegue scrivi(); se va bene propone di aprire il file, altrimenti spiega il problema."""
+        try:
+            self.config(cursor="watch")
+            self.update_idletasks()
+            scrivi()
+        except PermissionError:
+            messagebox.showerror("File in uso", "Non riesco a scrivere il file: forse è aperto in Excel "
+                                 "o in un altro programma? Chiudilo e riprova.")
+            return
+        except Exception as e:
+            messagebox.showerror("Salvataggio non riuscito", f"{path}\n\n{e}")
+            return
+        finally:
+            self.config(cursor="")
         if messagebox.askyesno("Salvato", f"{testo}\n\n{path}\n\nVuoi aprirlo adesso?"):
             apri_percorso(path)
 
@@ -830,12 +918,8 @@ class SchedaEsplora(ttk.Frame):
         p = self._chiedi_percorso(self._nome_suggerito(t, fmt), fmt, ex.FORMATI[fmt])
         if not p:
             return
-        try:
-            ex.esporta(p, fmt, NOMI_TABELLE[t], cols, righe, ex.descrivi_file(self.dati))
-        except PermissionError:
-            messagebox.showerror("File in uso", "Non riesco a scrivere il file: forse è aperto in Excel? Chiudilo e riprova.")
-            return
-        self._salvato(p, f"{len(righe)} righe salvate.")
+        self._salva(p, lambda: ex.esporta(p, fmt, NOMI_TABELLE[t], cols, righe, ex.descrivi_file(self.dati)),
+                    f"{len(righe)} righe salvate ({NOMI_TABELLE[t].lower()}).")
 
     def _esporta_tutte(self):
         if not self._pronto():
@@ -844,12 +928,9 @@ class SchedaEsplora(ttk.Frame):
         if not p:
             return
         fogli = {NOMI_TABELLE[t]: self._righe_filtrate(t) for t in ex.COLONNE}
-        try:
-            ex.esporta_xlsx(p, fogli)
-        except PermissionError:
-            messagebox.showerror("File in uso", "Non riesco a scrivere il file: forse è aperto in Excel? Chiudilo e riprova.")
-            return
-        self._salvato(p, "Un foglio per ogni tabella, con gli stessi filtri applicati.")
+        conteggi = ", ".join(f"{nome}: {len(r)}" for nome, (_, r) in fogli.items())
+        self._salva(p, lambda: ex.esporta_xlsx(p, fogli),
+                    f"Un foglio per ogni tabella, con gli stessi filtri applicati.\nRighe per foglio — {conteggi}.")
 
     def _calendario(self):
         if not self._pronto():
@@ -859,15 +940,28 @@ class SchedaEsplora(ttk.Frame):
         if not per:
             messagebox.showinfo("Orario settimanale", "Scegli prima come raggruppare le lezioni.")
             return
-        _, righe = self._righe_filtrate("lezioni")
+        # righe complete, senza «Unisci» né scelta colonne: al calendario servono giorno e ora,
+        # e le lezioni ripetute in più piani le toglie da sé
+        _, righe = self._righe_filtrate("lezioni", completo=True)
+        righe = [r for r in righe if r.get("giorno_n") and r.get("inizio") and r.get("fine")]
         if not righe:
-            messagebox.showinfo("Niente da mostrare", "Con questi filtri non ci sono lezioni con orario.")
+            messagebox.showinfo("Niente da mostrare", "Con questi filtri non ci sono lezioni con orario.\n\n"
+                                "Controlla i filtri, oppure scarica i dati con l'opzione «Orario delle lezioni».")
             return
         p = self._chiedi_percorso(self._nome_suggerito(f"orario_{per}", "html"), "html", "Pagina web")
         if not p:
             return
-        n = ex.esporta_calendario(p, righe, per, sottotitolo=ex.descrivi_file(self.dati))
-        self._salvato(p, f"{n} orari settimanali creati (si apre nel browser; si può stampare in PDF).")
+        self._salva(p, lambda: ex.esporta_calendario(p, righe, per, sottotitolo=ex.descrivi_file(self.dati)),
+                    "Orario settimanale creato: si apre nel browser e si può stampare o salvare in PDF.")
+
+
+def _durata(secondi):
+    minuti = round(secondi / 60)
+    if minuti < 1:
+        return "meno di un minuto"
+    if minuti < 60:
+        return f"{minuti} min"
+    return f"{minuti // 60} h {minuti % 60:02d} min"
 
 
 def _chiave(v):
@@ -886,6 +980,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Manifesti degli Studi PoliMi – scaglioni e orari")
+        self.chiusura_richiesta = False
+        self.protocol("WM_DELETE_WINDOW", self._chiudi)
         self._stile()
         w, h = min(1400, self.winfo_screenwidth() - 60), min(900, self.winfo_screenheight() - 100)
         self.geometry(f"{w}x{h}+20+20")
@@ -907,7 +1003,18 @@ class App(tk.Tk):
         elif "clam" in st.theme_names():
             st.theme_use("clam")
         st.configure("Accent.TButton", font=("", 10, "bold"))
-        st.configure("Treeview", rowheight=22)
+        # altezza righe dal font, così il testo non viene tagliato con lo zoom dello schermo al 125-150%
+        st.configure("Treeview", rowheight=tkfont.nametofont("TkDefaultFont").metrics("linespace") + 8)
+
+    def _chiudi(self):
+        if not self.scarica.in_corso():
+            self.destroy()
+            return
+        if messagebox.askyesno("Scaricamento in corso",
+                               "Uno scaricamento è ancora in corso.\n\n"
+                               "Vuoi interromperlo e chiudere? I dati raccolti finora verranno salvati."):
+            self.chiusura_richiesta = True
+            self.scarica._interrompi()  # alla fine del salvataggio _finito chiude la finestra
 
 
 def main():

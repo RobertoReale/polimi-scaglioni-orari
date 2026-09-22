@@ -28,7 +28,8 @@ in una cartella locale `.venv`. Serve la connessione a internet.
 ## Uso
 
 ### Scheda 1 · Scarica dati dal sito
-1. **Anno accademico e sede**: le scelte arrivano direttamente dal sito.
+1. **Anno accademico e sede**: le scelte arrivano direttamente dal sito. Con **Tipo di laurea** puoi mostrare
+   solo i corsi di un tipo (per esempio *Laurea Magistrale* o *Laurea di Primo Livello*); *Tutti i tipi* li mostra tutti.
 2. **Corsi di studio**: clic su un corso per selezionarlo. Un clic su una scuola o su un tipo di laurea
    (per esempio *Laurea di Primo Livello – ord. 96/23*) seleziona tutto il gruppo. Con **Cerca** filtri l'elenco.
 3. **Cosa includere**:
@@ -37,8 +38,10 @@ in una cartella locale `.venv`. Serve la connessione a internet.
    - scaglioni e orario.
 
    Senza scaglioni e orario ottieni solo l'elenco degli insegnamenti, che si scarica molto più in fretta.
-4. **Avvia scaricamento**. Una barra mostra l'avanzamento e puoi interrompere in qualsiasi momento: i dati
-   raccolti fino a quel punto vengono salvati comunque. Il risultato è un file `.json` nella cartella `output/`.
+4. **Avvia scaricamento**. Una barra mostra l'avanzamento con una stima del tempo rimanente. Puoi interrompere
+   in qualsiasi momento (anche chiudendo la finestra): i dati raccolti fino a quel punto vengono salvati comunque,
+   e lo stesso vale se la connessione cade. Il risultato è un file `.json` nella cartella `output/`; alla fine
+   un riepilogo dice quanti corsi, insegnamenti, scaglioni e lezioni sono stati letti.
 
 Se manca una scelta, il programma lo segnala prima di partire. Nulla viene scelto al posto tuo.
 
@@ -55,8 +58,10 @@ Se manca una scelta, il programma lo segnala prima di partire. Nulla viene scelt
 
 3. Restringi i risultati con i **filtri**: corso, piano, periodo, insegnamento, scaglione, giorno, aula,
    docente, oppure cerca un testo libero.
-   - L'opzione **"Unisci lo stesso insegnamento presente in più piani"** elimina i doppioni, perché uno
-     stesso insegnamento può comparire in più piani di studio.
+   - L'opzione **"Una riga sola per ciò che si ripete in più corsi"** elimina i doppioni: uno stesso
+     insegnamento (o scaglione, o lezione) può comparire in più corsi e piani di studio. Resta una riga sola,
+     e le colonne Corso e Piano elencano tutti i corsi separati da `|`. Per esempio, nella tabella Scaglioni
+     Analisi Matematica 1 passa da 32 righe (8 scaglioni × 4 corsi) a 8. Vale anche per i file esportati.
    - Con **Colonne…** scegli quali colonne tenere.
    - Con un doppio clic su una riga la vedi per intero.
 4. **Salva** le righe filtrate:
@@ -64,6 +69,8 @@ Se manca una scelta, il programma lo segnala prima di partire. Nulla viene scelt
    - **Excel con tutte le tabelle**: un foglio per ogni tabella, con gli stessi filtri applicati;
    - **Orario settimanale**: una pagina con le griglie Lunedì–Venerdì. Puoi raggrupparle per scaglione,
      per insegnamento, per piano, per aula o per docente. Si stampa o si salva in PDF dal browser.
+
+   Le pagine web esportate usano sempre il tema chiaro, anche se il computer è in modalità scura.
 
 ## Cache
 Le pagine scaricate restano salvate nella cartella `cache/`, così ripetere o ampliare uno scaricamento è
@@ -73,7 +80,7 @@ immediato. **Per avere i dati aggiornati dal sito usa "Svuota cache"** nella sch
 ```bash
 python scarica_manifesti.py --elenca          # elenca anni, sedi, scuole e codici dei corsi
 python scarica_manifesti.py --sede MI --ordinamento 96/23 --anni-corso 1 --periodi annuale,1sem
-python scarica_manifesti.py --corsi 531 --piani primo --no-orari
+python scarica_manifesti.py --corsi 531 --piani primo --no-orari --paralleli 2
 python esporta.py output/FILE.json --tabella scaglioni --formato xlsx --filtro corso_codice=531
 python esporta.py output/FILE.json --calendario scaglione --filtro piano_codice=IT1
 python esporta.py output/FILE.json --tutte --formato xlsx
@@ -109,5 +116,8 @@ corsi_di_studio[]
 - Gli orari di inizio e fine vengono ricavati dalla griglia a quarti d'ora del sito.
 - Alcuni insegnamenti non hanno orario: il sito indica "Non esistono occupazioni" oppure l'insegnamento
   è erogato da un ateneo partner.
-- Il programma aspetta un attimo tra una richiesta e l'altra per non sovraccaricare il sito. La pausa
-  si regola in *Avanzate*.
+- Il programma aspetta un attimo tra una richiesta e l'altra per non sovraccaricare il sito e ne fa al
+  massimo 4 insieme, perché quasi tutto il tempo è attesa del server. Pausa e richieste in parallelo si
+  regolano in *Avanzate*.
+- Nelle tabelle, lo scaglione `A – ZZZZ (unico)` vuol dire che c'è un solo scaglione per tutti gli studenti.
+- Nel CSV i decimali usano la virgola, così Excel in italiano non li scambia per date.

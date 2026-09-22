@@ -18,7 +18,9 @@ import hashlib
 import json
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -35,11 +37,12 @@ HERE = Path(__file__).resolve().parent
 # --------------------------------------------------------------------------- HTTP
 
 class Client:
-    """Sessione HTTP con pausa tra le richieste, retry e cache su disco."""
+    """Sessione HTTP con pausa tra le richieste, retry e cache su disco.
+    Si può usare da più thread insieme (una sessione per thread)."""
 
     def __init__(self, delay=0.4, cache_dir=None, retries=4, log=None, stop=None):
-        self.s = requests.Session()
-        self.s.headers["User-Agent"] = "Mozilla/5.0 (polimi-scaglioni-orari)"
+        self._locale = threading.local()
+        self._lock = threading.Lock()
         self.delay = delay
         self.retries = retries
         self.cache_dir = Path(cache_dir) if cache_dir else None
@@ -49,20 +52,35 @@ class Client:
         self.stop = stop  # threading.Event opzionale: se impostato, interrompe
         self.n_requests = 0
 
+    @property
+    def s(self):
+        s = getattr(self._locale, "s", None)
+        if s is None:
+            s = self._locale.s = requests.Session()
+            s.headers["User-Agent"] = "Mozilla/5.0 (polimi-scaglioni-orari)"
+        return s
+
+    def _pausa(self, secondi):
+        """Attende `secondi`, ma si sveglia subito se l'utente interrompe."""
+        if self.stop is None:
+            time.sleep(secondi)
+        elif self.stop.wait(secondi):
+            raise Interrotto()
+
     def get(self, url, params=None):
         req = requests.Request("GET", url, params=params).prepare()
         key = hashlib.sha1(req.url.encode()).hexdigest()
-        if self.cache_dir:
-            f = self.cache_dir / f"{key}.html"
-            if f.exists():
-                return f.read_text(encoding="utf-8")
+        f = self.cache_dir / f"{key}.html" if self.cache_dir else None
+        if f and f.exists():
+            return f.read_text(encoding="utf-8")
         for attempt in range(1, self.retries + 1):
             if self.stop is not None and self.stop.is_set():
                 raise Interrotto()
             try:
-                time.sleep(self.delay)
+                self._pausa(self.delay)
                 r = self.s.get(req.url, timeout=60)
-                self.n_requests += 1
+                with self._lock:
+                    self.n_requests += 1
                 r.raise_for_status()
                 r.encoding = r.encoding or "utf-8"
                 html = r.text
@@ -72,9 +90,12 @@ class Client:
                     raise
                 wait = 2 ** attempt
                 self.log(f"    ! errore di rete ({e}); riprovo tra {wait}s")
-                time.sleep(wait)
-        if self.cache_dir:
-            (self.cache_dir / f"{key}.html").write_text(html, encoding="utf-8")
+                self._pausa(wait)
+        if f:
+            # scrittura atomica: un'interruzione non lascia file a metà nella cache
+            tmp = f.with_suffix(f".{threading.get_ident()}.tmp")
+            tmp.write_text(html, encoding="utf-8")
+            tmp.replace(f)
         return html
 
 
@@ -92,6 +113,11 @@ def soup(html):
 
 def txt(el):
     return re.sub(r"\s+", " ", el.get_text(" ", strip=True)).strip() if el else ""
+
+
+def link_pulito(href):
+    """URL assoluto senza ';jsessionid=…' (legato alla sessione, scade)."""
+    return re.sub(r";jsessionid=[^?#]*", "", urljoin(HOST, href.strip()))
 
 
 def qs_of(href):
@@ -152,7 +178,7 @@ def header_names(grid, n_header_rows):
 def cell_info(cell):
     """Testo della cella + eventuali link (testo, url) e immagini-bandiera."""
     info = {"testo": txt(cell)}
-    links = [(txt(a), urljoin(HOST, a["href"])) for a in cell.find_all("a", href=True) if txt(a)]
+    links = [(txt(a), link_pulito(a["href"])) for a in cell.find_all("a", href=True) if txt(a)]
     if links:
         info["link"] = links
     flags = [Path(i["src"]).stem for i in cell.find_all("img", src=True) if "flag" in i["src"]]
@@ -231,7 +257,7 @@ def parse_insegnamenti(page):
                     break
             if not link:
                 continue
-            url = urljoin(HOST, link["href"])
+            url = link_pulito(link["href"])
             if url in seen:
                 continue
             seen.add(url)
@@ -312,7 +338,7 @@ def parse_scaglioni(fragment):
                 r["lingua"] = info.get("lingue", [])
             elif key == "programma":
                 r["programma_url"] = [l[1] for l in info.get("link", [])] or [
-                    urljoin(HOST, a["href"]) for a in cell.find_all("a", href=True)]
+                    link_pulito(a["href"]) for a in cell.find_all("a", href=True)]
             else:
                 r[key] = info["testo"]
         if any(v for v in r.values()):
@@ -439,6 +465,17 @@ def parse_orario(fragment):
     return lezioni
 
 
+NOTA_ORARIO_ASSENTE = "orario non pubblicato sul sito"
+NOTA_NESSUNA_LEZIONE = "nessuna lezione in orario"
+
+
+def nota_orario_vuoto(testo):
+    """Messaggio leggibile quando il tab orario non contiene lezioni."""
+    if not testo or "Non esistono occupazioni" in testo or "Data Dove" in testo:
+        return NOTA_NESSUNA_LEZIONE  # messaggio del sito o griglia settimanale vuota
+    return testo[:300]
+
+
 def fetch_dettaglio(cli, url, with_orari):
     """Pagina di dettaglio di un insegnamento: una o più sezioni (tab)."""
     page = soup(cli.get(url))
@@ -462,12 +499,12 @@ def fetch_dettaglio(cli, url, with_orari):
             disabled = "ui-state-disabled" in (li_or.get("class") or [])
             if disabled:
                 sez["orario"] = []
-                sez["orario_nota"] = "tab orario disabilitato"
+                sez["orario_nota"] = NOTA_ORARIO_ASSENTE
             else:
                 frag = soup(cli.get(BASE + "?evn_DETTAGLIO_ORARIO_AJAX=evento" + li_or["qs"]))
                 sez["orario"] = parse_orario(frag)
                 if not sez["orario"]:
-                    sez["orario_nota"] = txt(frag)[:300] or "nessun orario"
+                    sez["orario_nota"] = nota_orario_vuoto(txt(frag))
         sezioni.append(sez)
     nota = None
     if not sezioni:
@@ -477,6 +514,34 @@ def fetch_dettaglio(cli, url, with_orari):
         b = t.find("manifesti v.")
         nota = t[a:b if b > a else a + 1500].strip()[:1500]
     return sezioni, nota
+
+
+# ------------------------------------------------------------------ parallelismo
+
+# il tempo è quasi tutto attesa del server (1-2 s a pagina): poche richieste
+# contemporanee accorciano molto lo scaricamento senza pesare sul sito
+PARALLELI_DEFAULT = 4
+
+
+def in_parallelo(funzione, elementi, paralleli):
+    """Esegue funzione(e) per ogni elemento su `paralleli` thread e restituisce
+    (indice, elemento, risultato, errore) man mano che i lavori finiscono.
+    Se l'utente interrompe, annulla i lavori non ancora partiti e rilancia Interrotto."""
+    with ThreadPoolExecutor(max_workers=max(1, int(paralleli))) as pool:
+        futuri = {pool.submit(funzione, e): (k, e) for k, e in enumerate(elementi)}
+        try:
+            for fut in as_completed(futuri):
+                k, e = futuri[fut]
+                try:
+                    res, err = fut.result(), None
+                except Interrotto:
+                    raise
+                except Exception as x:
+                    res, err = None, x
+                yield k, e, res, err
+        finally:
+            for fut in futuri:
+                fut.cancel()
 
 
 # -------------------------------------------------------------------- catalogo
@@ -491,12 +556,18 @@ def catalogo(aa=None, sede=None, lang="IT", log=print_log, stop=None):
     aa = aa or next((o["valore"] for o in anni_acc if o["selezionata"]), anni_acc[0]["valore"])
     sede = sede or "ALL_SEDI"
     first = manifesto_page(cli, aa=aa, sede=sede, lang=lang)
-    scuole = []
-    for sc in select_options(first, "k_cf"):
+
+    def corsi_scuola(sc):
         pg = manifesto_page(cli, aa=aa, sede=sede, k_cf=sc["valore"], lang=lang)
-        corsi = [{"codice": o["valore"], "nome": o["testo"], "gruppo": o["gruppo"]}
-                 for o in select_options(pg, "k_corso_la") if o["valore"]]
-        scuole.append({"codice": sc["valore"], "nome": sc["testo"], "corsi": corsi})
+        return [{"codice": o["valore"], "nome": o["testo"], "gruppo": o["gruppo"]}
+                for o in select_options(pg, "k_corso_la") if o["valore"]]
+
+    elenco = select_options(first, "k_cf")
+    scuole = [None] * len(elenco)
+    for k, sc, corsi, err in in_parallelo(corsi_scuola, elenco, PARALLELI_DEFAULT):
+        if err:
+            raise err
+        scuole[k] = {"codice": sc["valore"], "nome": sc["testo"], "corsi": corsi}
     return {
         "anni_accademici": [{"codice": o["valore"], "nome": o["testo"]} for o in anni_acc],
         "sedi": [{"codice": o["valore"], "nome": o["testo"]} for o in sedi],
@@ -515,7 +586,7 @@ class Opzioni:
     """Cosa scaricare. None nei filtri = nessun filtro (tutto)."""
     aa: str = None                     # anno accademico, es. "2026" (= 2026/2027); None = quello attuale
     sede: str = "ALL_SEDI"             # MI, BV, CO, CR, LC, MN, PC, ALL_SEDI
-    lang: str = "IT"                   # lingua del sito: IT / EN
+    lang: str = "IT"                   # solo IT: il parser riconosce le intestazioni in italiano
     scuole: list = None                # codici scuola, es. ["225"]
     corsi: list = None                 # codici corso di studi, es. ["531", "1030"]
     ordinamento: str = ""              # testo nel tipo di laurea, es. "96/23" o "270"
@@ -529,6 +600,7 @@ class Opzioni:
     orari: bool = True                 # scarica anche l'orario didattico
     out: str = None                    # file JSON; None = nome automatico in output/
     delay: float = 0.4                 # pausa tra le richieste (secondi)
+    paralleli: int = PARALLELI_DEFAULT # richieste contemporanee al sito
     cache: str = str(HERE / "cache")   # cartella cache; "" = disattivata
 
 
@@ -540,7 +612,21 @@ def periodo_ok(periodo, periodi):
 
 
 def nome_file_default(aa, sede):
-    return HERE / "output" / f"manifesti_{aa}_{sede}_{datetime.now():%Y-%m-%d_%H%M}.json"
+    return HERE / "output" / f"manifesti_{aa}_{sede}_{datetime.now():%Y-%m-%d_%H%M%S}.json"
+
+
+def riepilogo(result):
+    """Conteggi finali del file: mostrati a fine scaricamento e salvati in meta."""
+    ins = [i for c in result["corsi_di_studio"] for p in c["piani"] for i in p["insegnamenti"]]
+    return {
+        "corsi": len(result["corsi_di_studio"]),
+        "piani": sum(len(c["piani"]) for c in result["corsi_di_studio"]),
+        "insegnamenti": len(ins),
+        "scaglioni": sum(i.get("n_scaglioni") or 0 for i in ins),
+        "lezioni_settimanali": sum(len(s.get("orario", [])) for i in ins for s in i.get("sezioni", [])),
+        "insegnamenti_con_errore": sum(1 for i in ins if i.get("errore")),
+        "corsi_con_errore": sum(1 for c in result["corsi_di_studio"] if c.get("errore")),
+    }
 
 
 def scarica(opt, log=print_log, progress=None, stop=None):
@@ -553,7 +639,10 @@ def scarica(opt, log=print_log, progress=None, stop=None):
     anni = [str(a) for a in opt.anni_corso] or ["0"]
 
     home = soup(Client(delay=0, log=log, stop=stop).get(BASE, {"evn_DEFAULT": "evento", "lang": lang}))
-    aa = opt.aa or next((o["valore"] for o in select_options(home, "aa") if o["selezionata"]), None)
+    anni_acc = select_options(home, "aa")
+    if not anni_acc:
+        raise ValueError("Il sito non ha restituito gli anni accademici: riprova tra poco.")
+    aa = opt.aa or next((o["valore"] for o in anni_acc if o["selezionata"]), anni_acc[0]["valore"])
     sedi = {o["valore"]: o["testo"] for o in select_options(home, "sede")}
     if opt.sede not in sedi:
         raise ValueError(f"Sede '{opt.sede}' non valida. Valori: {', '.join(sedi)}")
@@ -599,24 +688,22 @@ def scarica(opt, log=print_log, progress=None, stop=None):
                 lavori.append((sc, c))
         log(f"{len(lavori)} corsi di studio da elaborare")
 
-        # ---- fase 2: piani ed elenco insegnamenti
-        da_dettagliare = []
-        for n, (sc, c) in enumerate(lavori, 1):
-            progress("Elenco insegnamenti", n - 1, len(lavori))
+        # ---- fase 2: piani ed elenco insegnamenti (più corsi insieme)
+        def elabora_corso(lavoro):
+            sc, c = lavoro
             corso = {
                 "scuola": {"codice": sc["valore"], "nome": sc["testo"]},
                 "codice": c["valore"], "nome": c["testo"], "tipo_ordinamento": c["gruppo"],
                 "anni_disponibili": [], "piani": [], "piani_scartati": [], "note": [],
             }
-            result["corsi_di_studio"].append(corso)
-            log(f"\n[{n}/{len(lavori)}] {c['testo']} ({c['valore']})")
+            righe_log = []
             for anno in anni:
                 pg = manifesto_page(cli, aa=aa, sede=opt.sede, k_cf=sc["valore"],
                                     k_corso_la=c["valore"], ac_ins=anno, lang=lang)
                 corso["anni_disponibili"] = [o["valore"] for o in select_options(pg, "ac_ins")]
                 if anno not in corso["anni_disponibili"]:
                     corso["note"].append(f"anno di corso {anno} non disponibile")
-                    log(f"  anno {anno}: non disponibile")
+                    righe_log.append(f"  anno {anno}: non disponibile")
                     continue
                 piani = select_options(pg, "k_indir")
                 cand = [p for p in piani if p["valore"] != "***" or opt.includi_non_diversificato
@@ -637,49 +724,74 @@ def scarica(opt, log=print_log, progress=None, stop=None):
                             and sede_nome.lower() not in p_sede.lower()):
                         corso["piani_scartati"].append({"codice": p["valore"], "nome": p["testo"],
                                                         "sede": p_sede, "anno_corso": anno})
-                        log(f"  anno {anno} · piano {p['valore']} scartato (sede: {p_sede})")
+                        righe_log.append(f"  anno {anno} · piano {p['valore']} scartato (sede: {p_sede})")
                         continue
                     ins_all = parse_insegnamenti(pp)
                     ins = [i for i in ins_all if periodo_ok(i.get("periodo"), opt.periodi)]
                     corso["piani"].append({
                         "codice": p["valore"], "nome": p["testo"], "sede": p_sede, "lingua": p_lingua,
                         "anno_corso": anno, "n_insegnamenti_totali": len(ins_all), "insegnamenti": ins})
-                    da_dettagliare += ins
                     presi += 1
-                    log(f"  anno {'tutti' if anno == '0' else anno} · piano {p['valore'] or 'unico'} "
-                        f"({p_sede or '-'}): {len(ins)} insegnamenti su {len(ins_all)}")
+                    righe_log.append(f"  anno {'tutti' if anno == '0' else anno} · piano {p['valore'] or 'unico'} "
+                                     f"({p_sede or '-'}): {len(ins)} insegnamenti su {len(ins_all)}")
             if not corso["note"]:
                 del corso["note"]
-        progress("Elenco insegnamenti", len(lavori), len(lavori))
+            return corso, righe_log
 
-        # ---- fase 3: scaglioni e orari
+        corsi = result["corsi_di_studio"] = [None] * len(lavori)  # stesso ordine del sito
+        progress("Elenco insegnamenti", 0, len(lavori))
+        for n, (k, (sc, c), res, err) in enumerate(in_parallelo(elabora_corso, lavori, opt.paralleli), 1):
+            log(f"\n[{n}/{len(lavori)}] {c['testo']} ({c['valore']})")
+            if err:  # un corso non letto non ferma gli altri
+                res = ({"scuola": {"codice": sc["valore"], "nome": sc["testo"]}, "codice": c["valore"],
+                        "nome": c["testo"], "tipo_ordinamento": c["gruppo"], "piani": [],
+                        "errore": str(err) or repr(err)}, [f"  ! non letto: {err!r}"])
+            corsi[k], righe_log = res
+            for r in righe_log:
+                log(r)
+            progress("Elenco insegnamenti", n, len(lavori))
+        da_dettagliare = [i for c in corsi for p in c["piani"] for i in p["insegnamenti"]]
+
+        # ---- fase 3: scaglioni e orari (più insegnamenti insieme)
         if opt.scaglioni or opt.orari:
             log(f"\nDettaglio di {len(da_dettagliare)} insegnamenti (scaglioni"
                 f"{' e orari' if opt.orari else ''})")
-            for n, i in enumerate(da_dettagliare, 1):
-                progress("Scaglioni e orari", n - 1, len(da_dettagliare))
-                try:
-                    i["sezioni"], nota = fetch_dettaglio(cli, i["url_dettaglio"], opt.orari)
-                    if nota:
-                        i["nota_dettaglio"] = nota
-                    i["n_scaglioni"] = sum(s["n_scaglioni"] for s in i["sezioni"])
-                except Interrotto:
-                    raise
-                except Exception as e:  # un insegnamento rotto non ferma tutto
-                    i["errore"] = repr(e)
-                    log(f"  ! {i['nome']}: {e!r}")
+            tot = len(da_dettagliare)
+            progress("Scaglioni e orari", 0, tot)
+            dettaglio = lambda i: fetch_dettaglio(cli, i["url_dettaglio"], opt.orari)  # noqa: E731
+            for n, (_, i, res, err) in enumerate(in_parallelo(dettaglio, da_dettagliare, opt.paralleli), 1):
+                progress("Scaglioni e orari", n, tot)
+                if err:  # un insegnamento rotto non ferma tutto
+                    i["errore"] = str(err) or repr(err)
+                    log(f"  ! {i.get('nome')}: {err!r}")
                     continue
+                i["sezioni"], nota = res
+                if nota:
+                    i["nota_dettaglio"] = nota
+                i["n_scaglioni"] = sum(s["n_scaglioni"] for s in i["sezioni"])
                 n_les = sum(len(s.get("orario", [])) for s in i["sezioni"])
-                log(f"  {i['codice']} {i['nome'][:48]:<48} {i.get('periodo', ''):<8} "
+                log(f"  {i.get('codice', '')} {(i.get('nome') or '')[:48]:<48} {i.get('periodo', ''):<8} "
                     f"scaglioni={i['n_scaglioni']:<2} lezioni={n_les}")
-            progress("Scaglioni e orari", len(da_dettagliare), len(da_dettagliare))
-        result["meta"]["completo"] = True
+        n_err = sum(1 for c in corsi if c.get("errore"))
+        if n_err:
+            result["meta"]["errore"] = f"{n_err} corsi di studio non letti per un errore (vedi il registro)"
+        result["meta"]["completo"] = not n_err
     except Interrotto:
+        result["meta"]["interrotto"] = True
         log("\nInterrotto dall'utente: salvo i dati raccolti finora.")
+    except Exception as e:  # es. sito irraggiungibile: non perdere quanto già scaricato
+        result["meta"]["errore"] = str(e) or repr(e)
+        log(f"\nERRORE: {e!r}\nSalvo i dati raccolti finora.")
+    # interrotto durante la fase 2: tieni solo i corsi già letti
+    result["corsi_di_studio"] = [c for c in result["corsi_di_studio"] if c]
+    result["meta"]["riepilogo"] = rie = riepilogo(result)
     salva()
-    n_ins = sum(len(p["insegnamenti"]) for c in result["corsi_di_studio"] for p in c["piani"])
-    log(f"\nFatto: {len(result['corsi_di_studio'])} corsi, {n_ins} insegnamenti, "
-        f"{cli.n_requests} pagine scaricate dal sito.\nSalvato in: {out}")
+    log(f"\nFatto: {rie['corsi']} corsi, {rie['piani']} piani, {rie['insegnamenti']} insegnamenti, "
+        f"{rie['scaglioni']} scaglioni, {rie['lezioni_settimanali']} lezioni settimanali "
+        f"({cli.n_requests} pagine scaricate dal sito)."
+        + (f"\n{rie['insegnamenti_con_errore']} insegnamenti non letti per errore (vedi colonna Note)."
+           if rie["insegnamenti_con_errore"] else "")
+        + f"\nSalvato in: {out}")
     return out
 
 
@@ -716,15 +828,16 @@ def main():
     ap.add_argument("--no-dettagli", action="store_true", help="solo elenco insegnamenti (niente scaglioni/orari)")
     ap.add_argument("--out", help="file JSON di output (default: output/manifesti_<aa>_<sede>_<data>.json)")
     ap.add_argument("--delay", type=float, default=0.4, help="pausa in secondi tra le richieste")
+    ap.add_argument("--paralleli", type=int, default=PARALLELI_DEFAULT,
+                    help=f"richieste contemporanee al sito (default {PARALLELI_DEFAULT}; 1 = una alla volta)")
     ap.add_argument("--cache", default=str(HERE / "cache"), help="cartella cache; '' per disattivarla")
-    ap.add_argument("--lang", default="IT", help="lingua del sito IT/EN")
     args = ap.parse_args()
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     if args.elenca:
-        cat = catalogo(args.aa, args.sede, args.lang)
+        cat = catalogo(args.aa, args.sede)
         print("Anni accademici:", ", ".join(f"{a['codice']} ({a['nome']})" for a in cat["anni_accademici"]))
         print("Sedi:", ", ".join(f"{s['codice']} ({s['nome']})" for s in cat["sedi"]))
         for sc in cat["scuole"]:
@@ -736,7 +849,7 @@ def main():
     no_det = args.no_dettagli
     periodi = csv_arg(args.periodi)
     opt = Opzioni(
-        aa=args.aa, sede=args.sede, lang=args.lang,
+        aa=args.aa, sede=args.sede,
         scuole=csv_arg(args.scuole), corsi=csv_arg(args.corsi),
         ordinamento=args.ordinamento, tipo_laurea=csv_arg(args.tipo_laurea),
         anni_corso=csv_arg(args.anni_corso) or ["0"],
@@ -745,11 +858,13 @@ def main():
         includi_altre_sedi=args.includi_altre_sedi,
         periodi=None if periodi is None else {norm_periodo(p) for p in periodi},
         scaglioni=not no_det, orari=not (no_det or args.no_orari),
-        out=args.out, delay=args.delay, cache=args.cache)
+        out=args.out, delay=args.delay, paralleli=args.paralleli, cache=args.cache)
     try:
-        scarica(opt)
+        out = scarica(opt)
     except ValueError as e:
         sys.exit(str(e))
+    if json.loads(out.read_text(encoding="utf-8"))["meta"].get("errore"):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

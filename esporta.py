@@ -23,6 +23,7 @@ import csv
 import hashlib
 import html
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -76,8 +77,9 @@ DESCRIZIONI = {
     "piani": "Una riga per corso e piano di studi (anche quelli scartati perché di altre sedi)",
 }
 
-# colonne che cambiano da un piano all'altro: ignorate quando si uniscono i duplicati
-VARIABILI_PER_PIANO = set(CONTESTO) | {"url", "blocco", "anno_corso"}
+# colonne che cambiano da un piano all'altro (la sezione è un codice interno del sito, diverso per ogni
+# corso anche quando lo scaglione è lo stesso): ignorate quando si uniscono i duplicati
+VARIABILI_PER_PIANO = set(CONTESTO) | {"url", "blocco", "anno_corso", "sezione"}
 
 GIORNI_BREVI = {"Lunedì": "Lun", "Martedì": "Mar", "Mercoledì": "Mer", "Giovedì": "Gio",
                 "Venerdì": "Ven", "Sabato": "Sab", "Domenica": "Dom"}
@@ -98,10 +100,39 @@ def _lista(v):
 
 
 def _num(v):
+    """'6.0' -> 6, '7,5' -> 7.5; il resto invariato."""
     try:
-        return float(str(v).replace(",", "."))
+        f = float(str(v).replace(",", "."))
     except (TypeError, ValueError):
         return v
+    return int(f) if f.is_integer() else f
+
+
+# codice della bandierina sul sito -> lingua
+LINGUE = {"it": "Italiano", "gb": "Inglese", "en": "Inglese", "uk": "Inglese", "fr": "Francese",
+          "de": "Tedesco", "es": "Spagnolo", "pt": "Portoghese", "nl": "Olandese", "no": "Norvegese",
+          "sv": "Svedese", "se": "Svedese", "pl": "Polacco", "zh": "Cinese", "cn": "Cinese"}
+
+
+def _lingue(v):
+    v = v if isinstance(v, list) else ([v] if v else [])
+    return ", ".join(dict.fromkeys(LINGUE.get(str(x).lower(), str(x).upper()) for x in v))
+
+
+def _nota_chiara(nota):
+    """Note dello scraper in forma breve e leggibile (vale anche per i file scaricati
+    con versioni precedenti, che contenevano il testo grezzo della pagina)."""
+    if not nota:
+        return ""
+    if "Non esistono occupazioni" in nota or "Data Dove" in nota or nota == "nessun orario":
+        return "nessuna lezione in orario"
+    if nota == "tab orario disabilitato":
+        return "orario non pubblicato sul sito"
+    m = re.search(r"(Insegnamento riservato[^.]*?)\s+Erogato da\s+(.+?)\s+Città - Paese\s+(.+?)\s+Scheda", nota)
+    if m:
+        luogo = re.sub(r"^null\s*-\s*", "", m.group(3), flags=re.I).title()  # città mancante sul sito
+        return f"{m.group(1)}; erogato da {m.group(2).title()} ({luogo})"
+    return nota[:500]
 
 
 def _ctx(dati, corso, piano):
@@ -120,7 +151,9 @@ def _ctx(dati, corso, piano):
 
 
 def _nome_scaglione(da, a):
-    return f"{da or '?'} – {a or '?'}"
+    nome = f"{da or '?'} – {a or '?'}"
+    # A – ZZZZ copre tutti i cognomi: un solo scaglione per tutti gli studenti
+    return f"{nome} (unico)" if da == "A" and a and set(a) == {"Z"} else nome
 
 
 def _sintesi_orario(lezioni):
@@ -159,8 +192,8 @@ def tabelle(dati):
                             **base, "sezione": sez.get("id_sezione"), "scaglione": nome_sc,
                             "da": sc.get("da"), "a": sc.get("a"), "docenti": _lista(sc.get("docenti")),
                             "moduli": "; ".join(dict.fromkeys(moduli)), "n_lezioni": len(lez_sc),
-                            "ore_settimanali": round(sum(lz.get("durata_min") or 0 for lz in lez_sc) / 60, 2),
-                            "orario": _sintesi_orario(lez_sc) or sez.get("orario_nota", ""),
+                            "ore_settimanali": _num(round(sum(lz.get("durata_min") or 0 for lz in lez_sc) / 60, 2)),
+                            "orario": _sintesi_orario(lez_sc) or _nota_chiara(sez.get("orario_nota")),
                             "aule": ", ".join(dict.fromkeys(lz.get("aula") for lz in lez_sc if lz.get("aula"))),
                         })
                     doc_sc = {(sc.get("da"), sc.get("a")): _lista(sc.get("docenti")) for sc in sez.get("scaglioni", [])}
@@ -177,14 +210,17 @@ def tabelle(dati):
                             "n_date": len(date) or None, "date_lezioni": ", ".join(date),
                             "periodo_orario": lz.get("periodo_orario"),
                         })
-                nota = ins.get("errore") or ins.get("nota_dettaglio") or "; ".join(
-                    dict.fromkeys(s["orario_nota"] for s in sezioni if s.get("orario_nota")))
+                if ins.get("errore"):
+                    nota = f"non letto per un errore: {ins['errore']}"[:500]
+                else:
+                    nota = _nota_chiara(ins.get("nota_dettaglio")) or "; ".join(
+                        dict.fromkeys(_nota_chiara(s["orario_nota"]) for s in sezioni if s.get("orario_nota")))
                 out["insegnamenti"].append({
-                    **base, "tipo": ins.get("tipo"), "ssd": ins.get("ssd"), "lingua": _lista(ins.get("lingua")),
+                    **base, "tipo": ins.get("tipo"), "ssd": ins.get("ssd"), "lingua": _lingue(ins.get("lingua")),
                     "sede_erogazione": ins.get("sede_erogazione"), "blocco": ins.get("blocco"),
-                    "anno_corso": ins.get("anno_corso"), "n_scaglioni": ins.get("n_scaglioni"),
+                    "anno_corso": _num(ins.get("anno_corso")), "n_scaglioni": ins.get("n_scaglioni"),
                     "scaglioni": "; ".join(nomi_sc), "docenti": ", ".join(tutti_doc),
-                    "n_lezioni": len(tutte_lez), "nota": (nota or "")[:500],
+                    "n_lezioni": len(tutte_lez), "nota": nota,
                 })
         for ps in corso.get("piani_scartati", []):
             ctx = _ctx(dati, corso, {"codice": ps.get("codice"), "nome": ps.get("nome"),
@@ -192,7 +228,9 @@ def tabelle(dati):
             out["piani"].append({**ctx, "stato": "scartato (altra sede)"})
         if not corso.get("piani") and not corso.get("piani_scartati"):
             ctx = _ctx(dati, corso, None)
-            out["piani"].append({**ctx, "stato": "; ".join(corso.get("note", [])) or corso.get("nota") or "nessun piano"})
+            stato = (f"non letto per un errore: {corso['errore']}" if corso.get("errore")
+                     else "; ".join(corso.get("note", [])) or corso.get("nota") or "nessun piano")
+            out["piani"].append({**ctx, "stato": stato})
     return out
 
 
@@ -244,12 +282,20 @@ def unisci_duplicati(righe, colonne):
 
 # ------------------------------------------------------------------ scrittura tabelle
 
+def _csv_val(v):
+    if v is None:
+        return ""
+    if isinstance(v, float):
+        return str(v).replace(".", ",")  # Excel italiano: '7.5' diventerebbe una data
+    return v
+
+
 def esporta_csv(path, colonne, righe):
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
         w.writerow([label(c) for c in colonne])
         for r in righe:
-            w.writerow(["" if r.get(c) is None else r.get(c) for c in colonne])
+            w.writerow([_csv_val(r.get(c)) for c in colonne])
 
 
 def esporta_json(path, colonne, righe):
@@ -260,8 +306,12 @@ def esporta_json(path, colonne, righe):
 def esporta_xlsx(path, fogli):
     """fogli: {nome_foglio: (colonne, righe)}"""
     from openpyxl import Workbook
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
+
+    def val(v):
+        return ILLEGAL_CHARACTERS_RE.sub("", v) if isinstance(v, str) else v
 
     wb = Workbook()
     wb.remove(wb.active)
@@ -273,7 +323,7 @@ def esporta_xlsx(path, fogli):
             cell.fill = PatternFill("solid", fgColor="1F4E79")
             cell.alignment = Alignment(vertical="center", wrap_text=True)
         for r in righe:
-            ws.append([r.get(c) for c in colonne])
+            ws.append([val(r.get(c)) for c in colonne])
         if "url" in colonne:
             ci = colonne.index("url") + 1
             for row in ws.iter_rows(min_row=2, min_col=ci, max_col=ci):
@@ -293,8 +343,7 @@ def esporta_xlsx(path, fogli):
 
 
 CSS_BASE = """
-:root{--bg:#f7f8fa;--card:#fff;--fg:#1c1e21;--muted:#65676b;--line:#dde1e6;--head:#1f4e79;--headfg:#fff;--hi:#fff6d6}
-@media (prefers-color-scheme:dark){:root{--bg:#16181c;--card:#1f2227;--fg:#e8eaed;--muted:#9aa0a6;--line:#343840;--head:#2b5d8c;--headfg:#fff;--hi:#4a3f1a}}
+:root{color-scheme:light;--bg:#f7f8fa;--card:#fff;--fg:#1c1e21;--muted:#65676b;--line:#dde1e6;--head:#1f4e79;--headfg:#fff;--hi:#fff6d6}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 header{padding:16px}h1{font-size:20px;margin:0 0 4px}.sub{color:var(--muted);font-size:13px}
 """
@@ -496,8 +545,10 @@ def descrivi_file(dati):
     parti = [f"a.a. {p.get('aa')}/{int(p['aa']) + 1}" if str(p.get("aa", "")).isdigit() else "",
              p.get("sede_nome") or p.get("sede") or "",
              f"generato il {dati.get('meta', {}).get('generato_il', '?').replace('T', ' ')}"]
-    if dati.get("meta", {}).get("completo") is False:
-        parti.append("SCARICAMENTO INCOMPLETO")
+    meta = dati.get("meta", {})
+    if meta.get("completo") is False:
+        motivo = "per un errore" if meta.get("errore") else "interrotto" if meta.get("interrotto") else ""
+        parti.append(f"SCARICAMENTO INCOMPLETO {motivo}".strip())
     return " · ".join(x for x in parti if x)
 
 
@@ -513,7 +564,7 @@ def main():
     ap.add_argument("--cerca", default="", help="parole da cercare in qualunque colonna")
     ap.add_argument("--colonne", help="colonne da esportare, separate da virgola (default: tutte)")
     ap.add_argument("--unisci-duplicati", action="store_true",
-                    help="una sola riga per insegnamento anche se compare in più piani")
+                    help="una sola riga per insegnamento, scaglione o lezione anche se compare in più corsi e piani")
     ap.add_argument("--calendario", choices=list(RAGGRUPPA), help="crea l'orario settimanale HTML raggruppato così")
     ap.add_argument("--out", help="file di destinazione (default: in output/esportazioni/)")
     ap.add_argument("--elenca-valori", metavar="COLONNA", help="mostra i valori presenti in una colonna ed esce")
@@ -542,7 +593,8 @@ def main():
         return cols, righe
 
     if a.calendario:
-        _, righe = prepara("lezioni")
+        # righe complete: il calendario ha bisogno di giorno/ora e toglie da sé i doppioni
+        righe = filtra(tab["lezioni"], {k: v for k, v in filtri.items() if k in COLONNE["lezioni"]}, a.cerca)
         out = Path(a.out or cartella / f"calendario_{a.calendario}_{stamp}.html")
         out.parent.mkdir(parents=True, exist_ok=True)
         n = esporta_calendario(out, righe, a.calendario, sottotitolo=descrivi_file(dati))
