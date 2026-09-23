@@ -1,11 +1,19 @@
 # PoliMi – scaglioni e orari
 
-Programma per scaricare dal sito dei [Manifesti degli Studi del Politecnico di Milano](https://onlineservices.polimi.it/manifesti/manifesti/controller/ManifestoPublic.do?evn_DEFAULT=evento&lang=IT)
-gli insegnamenti di uno o più corsi di studio, con i loro **scaglioni** (lettere, docenti, moduli) e
-l'**orario delle lezioni** (giorni, ore, aule). I dati si possono poi filtrare e salvare in **Excel, CSV,
-pagina web** o come **orario settimanale** da stampare.
+**Cosa fa:** legge dal sito dei [Manifesti degli Studi del Politecnico di Milano](https://onlineservices.polimi.it/manifesti/manifesti/controller/ManifestoPublic.do?evn_DEFAULT=evento&lang=IT)
+gli insegnamenti dei corsi di studio che scegli, con i loro **scaglioni** (gli studenti divisi per iniziale
+del cognome, ognuno con i suoi docenti) e l'**orario delle lezioni** (giorni, ore, aule). Poi puoi
+filtrare i dati e salvarli in **Excel, CSV, pagina web** o come **orario settimanale** da stampare.
 
+**Come si usa, in due passi:**
+1. **Scarica** i dati dei corsi che ti interessano (scheda 1).
+2. **Esplora ed esporta**: consulta i dati, filtrali e salvali nel formato che preferisci (scheda 2).
+
+Il programma legge soltanto il sito pubblico: non modifica nulla e non chiede credenziali.
 Funziona su **Windows**, **Linux** e **macOS**.
+
+Nella finestra, il pulsante **❓ Guida** spiega tutto questo e le parole da conoscere. Se tieni il mouse
+fermo su un'opzione, compare una breve spiegazione di cosa fa.
 
 ## Installazione
 
@@ -25,23 +33,36 @@ in una cartella locale `.venv`. Serve la connessione a internet.
 | Linux / macOS | da terminale nella cartella: **`bash avvia.sh`** |
 | qualunque | `python avvia.py` |
 
+## Parole da conoscere
+
+| Parola | Significato |
+|---|---|
+| Corso di studi | per esempio *Ingegneria Informatica*; ogni corso ha un codice numerico (es. `531`) |
+| Tipo di laurea | Laurea di primo livello, Laurea Magistrale, Ciclo Unico… *ord. 96/23* indica il regolamento (ordinamento) del corso |
+| Piano di studi | una variante dello stesso corso (es. in italiano o in inglese, o in un'altra sede), con il suo elenco di insegnamenti. Il piano `***` raccoglie gli insegnamenti comuni a tutti i piani |
+| Periodo didattico | 1° semestre, 2° semestre o annuale |
+| Scaglione | gruppo di studenti di un insegnamento, diviso per iniziale del cognome, con i suoi docenti, orari e aule. `BRU – CON` vuol dire da BRU (compreso) a CON (escluso); `A – ZZZZ (unico)` vuol dire un solo gruppo per tutti |
+| Fascia di cognomi | gli insegnamenti dividono i cognomi in modi diversi: la fascia è un intervallo in cui la divisione è la stessa per tutti, e serve a comporre l'orario completo di uno studente |
+
 ## Uso
 
 ### Scheda 1 · Scarica dati dal sito
 1. **Anno accademico e sede**: le scelte arrivano direttamente dal sito. Con **Tipo di laurea** puoi mostrare
-   solo i corsi di un tipo (per esempio *Laurea Magistrale* o *Laurea di Primo Livello*); *Tutti i tipi* li mostra tutti.
+   solo i corsi di un tipo (per esempio *Laurea Magistrale*); *Tutti i tipi* li mostra tutti.
 2. **Corsi di studio**: clic su un corso per selezionarlo. Un clic su una scuola o su un tipo di laurea
-   (per esempio *Laurea di Primo Livello – ord. 96/23*) seleziona tutto il gruppo. Con **Cerca** filtri l'elenco.
+   (per esempio *Laurea di Primo Livello – ord. 96/23*) seleziona tutto il gruppo. Con **Cerca** trovi un
+   corso per nome o codice.
 3. **Cosa includere**:
    - anni di corso e periodo didattico;
    - piani di studio: tutti quelli della sede oppure solo il primo;
    - scaglioni e orario.
 
    Senza scaglioni e orario ottieni solo l'elenco degli insegnamenti, che si scarica molto più in fretta.
-4. **Avvia scaricamento**. Una barra mostra l'avanzamento con una stima del tempo rimanente. Puoi interrompere
-   in qualsiasi momento (anche chiudendo la finestra): i dati raccolti fino a quel punto vengono salvati comunque,
-   e lo stesso vale se la connessione cade. Il risultato è un file `.json` nella cartella `output/`; alla fine
-   un riepilogo dice quanti corsi, insegnamenti, scaglioni e lezioni sono stati letti.
+4. **Avvia scaricamento**. Prima di partire compare un **riepilogo delle scelte** da confermare. Una barra
+   mostra l'avanzamento con una stima del tempo rimanente. Puoi interrompere in qualsiasi momento (anche
+   chiudendo la finestra): i dati raccolti fino a quel punto vengono salvati comunque, e lo stesso vale se la
+   connessione cade. Il risultato è un file `.json` nella cartella `output/`; alla fine un riepilogo dice
+   quanti corsi, insegnamenti, scaglioni e lezioni sono stati letti.
 
 Se manca una scelta, il programma lo segnala prima di partire. Nulla viene scelto al posto tuo.
 
@@ -67,7 +88,8 @@ Se manca una scelta, il programma lo segnala prima di partire. Nulla viene scelt
    Scaglioni ci sono le date in cui vale, es. `09:15–13:15 aula G.3 [24/02→26/05]`.
 
 3. Restringi i risultati con i **filtri**: corso, piano, periodo, insegnamento, scaglione, giorno, aula,
-   docente, oppure cerca un testo libero.
+   docente, oppure cerca un testo libero. I filtri si sommano, e ogni menu propone solo i valori ancora
+   possibili con i filtri che lo precedono.
    - L'opzione **"Una riga sola per ciò che si ripete in più corsi"** elimina i doppioni: uno stesso
      insegnamento (o scaglione, o lezione) può comparire in più corsi e piani di studio. Resta una riga sola,
      e le colonne Corso e Piano elencano tutti i corsi separati da `|`. Per esempio, nella tabella Scaglioni
@@ -84,7 +106,16 @@ Se manca una scelta, il programma lo segnala prima di partire. Nulla viene scelt
 
 ## Cache
 Le pagine scaricate restano salvate nella cartella `cache/`, così ripetere o ampliare uno scaricamento è
-immediato. **Per avere i dati aggiornati dal sito usa "Svuota cache"** nella scheda 1, oppure cancella la cartella `cache/`.
+immediato. **Per avere i dati aggiornati dal sito usa "Svuota cache"** (scheda 1 → *Impostazioni avanzate…*),
+oppure cancella la cartella `cache/`.
+
+## Se qualcosa va storto
+- **Sito non raggiungibile**: controlla la connessione e riavvia il programma.
+- **Alcuni insegnamenti non letti**: li trovi segnalati nella colonna *Note*. Rilancia lo scaricamento con le
+  stesse scelte: le pagine già lette vengono prese dalla cache, quindi si rileggono solo quelle mancanti.
+- **"Non riesco a scrivere il file"**: il file è probabilmente aperto in Excel. Chiudilo e riprova.
+- **Il sito risponde con errori**: aumenta la *Pausa tra le richieste* o diminuisci le *Richieste in parallelo*
+  in *Impostazioni avanzate…*.
 
 ## Uso da terminale (facoltativo)
 ```bash
@@ -98,37 +129,14 @@ python esporta.py output/FILE.json --tutte --formato xlsx
 ```
 Ogni script mostra le opzioni disponibili con `--help`.
 
-## File del progetto
-| File | Contenuto |
-|---|---|
-| `avvia.bat`, `avvia.sh`, `avvia.py` | avvio: controllano e installano le librerie, poi aprono l'interfaccia |
-| `interfaccia.py` | interfaccia grafica (tkinter) |
-| `scarica_manifesti.py` | lettura del sito: corsi, piani, insegnamenti, scaglioni, orari → JSON |
-| `esporta.py` | trasformazione del JSON in tabelle ed esportazione (Excel, CSV, HTML, calendario) |
-
-## Struttura del file JSON
-```
-meta                      parametri usati, data, completo (false se interrotto)
-corsi_di_studio[]
-  scuola, codice, nome, tipo_ordinamento, anni_disponibili
-  piani_scartati[]        piani di altre sedi
-  piani[]
-    codice, nome, sede, lingua, anno_corso
-    insegnamenti[]
-      codice, nome, ssd, tipo, periodo, cfu, lingua, sede_erogazione, blocco, url_dettaglio
-      n_scaglioni, nota_dettaglio (es. corsi erogati da atenei partner)
-      sezioni[]
-        scaglioni[]       da, a (iniziali del cognome), docenti, righe[] (moduli)
-        orario[]          scaglione_da/a, giorno, inizio, fine, aula, aula_descrizione,
-                          attivita, dal, al, date_lezioni, periodo_orario
-```
-
 ## Note
 - Gli orari di inizio e fine vengono ricavati dalla griglia a quarti d'ora del sito.
 - Alcuni insegnamenti non hanno orario: il sito indica "Non esistono occupazioni" oppure l'insegnamento
   è erogato da un ateneo partner.
 - Il programma aspetta un attimo tra una richiesta e l'altra per non sovraccaricare il sito e ne fa al
-  massimo 4 insieme, perché quasi tutto il tempo è attesa del server. Pausa e richieste in parallelo si
-  regolano in *Avanzate*.
-- Nelle tabelle, lo scaglione `A – ZZZZ (unico)` vuol dire che c'è un solo scaglione per tutti gli studenti.
+  massimo 4 insieme, perché quasi tutto il tempo è attesa del server.
 - Nel CSV i decimali usano la virgola, così Excel in italiano non li scambia per date.
+
+## Per chi modifica il codice
+Come funziona il programma, com'è fatto il sito, la struttura del file JSON e come fare le modifiche più
+comuni: vedi **[SVILUPPO.md](SVILUPPO.md)**.

@@ -2,6 +2,15 @@
 """
 Interfaccia grafica dello scraper dei Manifesti degli Studi PoliMi.
 Avvio: avvia.bat (Windows), ./avvia.sh (Linux/macOS) oppure  python avvia.py
+
+La finestra ha due schede, che corrispondono ai due passi d'uso:
+    SchedaScarica  scelte dell'utente -> scarica_manifesti.Opzioni -> scarica_manifesti.scarica()
+    SchedaEsplora  file JSON -> esporta.tabelle() -> filtri -> esporta.esporta*()
+Questo file contiene solo l'interfaccia: la logica sta in scarica_manifesti.py ed esporta.py.
+
+Lo scaricamento gira in un thread separato, così la finestra resta reattiva. Il thread non tocca
+mai i widget (tkinter non lo permette): manda messaggi nella coda self.q, che il thread della
+finestra legge ogni 100 ms (_svuota_coda) e trasforma in aggiornamenti di registro e barra.
 """
 import os
 import queue
@@ -24,16 +33,67 @@ import scarica_manifesti as ps
 HERE = Path(__file__).resolve().parent
 OUTPUT = HERE / "output"
 CACHE = HERE / "cache"
-VUOTO = "— scegli —"
-TUTTI_TIPI = "Tutti i tipi"
+VUOTO = "— scegli —"             # combobox in cui l'utente non ha ancora scelto
+TUTTI_TIPI = "Tutti i tipi"       # «Tipo di laurea»: nessun filtro
+TUTTI = "(tutti)"                 # filtri della scheda 2: nessun filtro
+ON, OFF, MEZZO = "☑", "☐", "◩"    # spunta di un corso / gruppo tutto, per niente o in parte selezionato
+MAX_ANTEPRIMA = 3000              # righe mostrate nell'anteprima (il salvataggio le include tutte)
+GRIGIO, ROSSO, VERDE = "#666", "#b00020", "#1b7f3b"
+
+COSA_FA_BREVE = ("Scarica dai Manifesti degli Studi PoliMi insegnamenti, scaglioni e orari, "
+                 "e li salva in Excel, CSV, pagina web o come orario da stampare.")
+COSA_FA = ("Scarica dal sito dei Manifesti degli Studi del Politecnico di Milano gli insegnamenti dei corsi "
+           "che scegli, con gli scaglioni (gli studenti divisi per iniziale del cognome, ognuno con i suoi "
+           "docenti) e l'orario delle lezioni. Poi puoi filtrarli e salvarli in Excel, CSV, pagina web "
+           "o come orario settimanale da stampare.")
+
+# Testo della finestra «Guida»: (titolo, paragrafo)
+GUIDA = [
+    ("Cosa fa questo programma", COSA_FA + "\n\nI dati vengono letti dal sito ufficiale, pubblico: il programma "
+     "non modifica nulla e non richiede credenziali."),
+    ("Come si usa, in due passi",
+     "1 · Scheda «Scarica dati dal sito»: scegli anno accademico, sede, i corsi e cosa includere, poi premi "
+     "«Avvia scaricamento». Prima di partire vedi un riepilogo delle scelte da confermare. Il risultato è "
+     "un file di dati nella cartella output.\n"
+     "2 · Scheda «Esplora ed esporta»: apri un file di dati, scegli una tabella, restringi i risultati con "
+     "i filtri e salva le righe che vedi.\n\n"
+     "Se hai già scaricato i dati in passato puoi andare direttamente alla scheda 2."),
+    ("Parole da conoscere",
+     "• Corso di studi: per esempio Ingegneria Informatica. Ogni corso ha un codice numerico.\n"
+     "• Tipo di laurea: Laurea (primo livello), Laurea Magistrale, Ciclo Unico… «ord. 96/23» indica il "
+     "regolamento (ordinamento) del corso.\n"
+     "• Anno di corso: 1°, 2°, 3°… anno.\n"
+     "• Piano di studi: una variante dello stesso corso (per esempio in italiano o in inglese, o in "
+     "un'altra sede). Ogni piano ha il suo elenco di insegnamenti. Il piano «***» raccoglie gli "
+     "insegnamenti comuni a tutti i piani.\n"
+     "• Periodo didattico: 1° semestre, 2° semestre o annuale.\n"
+     "• Scaglione: quando un insegnamento ha molti studenti, li divide per iniziale del cognome; ogni "
+     "gruppo ha i suoi docenti, orari e aule. «BRU – CON» vuol dire: cognomi da BRU (compreso) fino a "
+     "CON (escluso). «A – ZZZZ (unico)» vuol dire che c'è un solo gruppo per tutti.\n"
+     "• Fascia di cognomi: gli insegnamenti dividono i cognomi in modi diversi. La tabella «Orario per "
+     "cognome» calcola le fasce in cui la divisione è la stessa per tutti gli insegnamenti, e per ognuna "
+     "mostra l'orario completo di uno studente con quel cognome."),
+    ("Le tabelle della scheda 2", "\n".join(f"• {nome}: {ex.DESCRIZIONI[k]}." for k, nome in [
+        ("insegnamenti", "Insegnamenti"), ("scaglioni", "Scaglioni"), ("cognomi", "Orario per cognome"),
+        ("lezioni", "Lezioni (orario)"), ("piani", "Corsi e piani")])
+     + "\n\nLo stesso insegnamento può comparire in più corsi e piani, e quindi in più righe: l'opzione "
+       "«Una riga sola per ciò che si ripete in più corsi» le unisce."),
+    ("Cache: le pagine già scaricate",
+     "Ogni pagina letta dal sito resta salvata nella cartella cache, così ripetere o ampliare uno "
+     "scaricamento è immediato. Se il sito è stato aggiornato e vuoi i dati nuovi, premi «Svuota cache» "
+     "prima di scaricare."),
+    ("Se qualcosa va storto",
+     "• Puoi interrompere in qualunque momento (anche chiudendo la finestra): i dati raccolti fino a quel "
+     "punto vengono salvati comunque. Lo stesso vale se la connessione cade.\n"
+     "• Se un insegnamento non si riesce a leggere, gli altri continuano: lo trovi segnalato nella colonna "
+     "«Note». Rilanciando lo scaricamento, le pagine già lette vengono prese dalla cache.\n"
+     "• «Non riesco a scrivere il file»: probabilmente è aperto in Excel. Chiudilo e riprova."),
+]
 
 
 def tipo_laurea(gruppo):
     """'Laurea Magistrale - ord. 96/23' -> 'Laurea Magistrale' (il tipo senza l'ordinamento)."""
     return re.split(r"\s+-\s+ord\b", gruppo or "", maxsplit=1, flags=re.I)[0].strip() or "Altro"
-TUTTI = "(tutti)"
-ON, OFF, MEZZO = "☑", "☐", "◩"
-MAX_ANTEPRIMA = 3000
 
 
 def apri_percorso(path):
@@ -51,8 +111,102 @@ def apri_percorso(path):
 
 
 class Sezione(ttk.LabelFrame):
+    """Riquadro con titolo che raggruppa i controlli di un passo (① ② ③ …)."""
     def __init__(self, parent, titolo, **kw):
         super().__init__(parent, text=f" {titolo} ", padding=(10, 6), **kw)
+
+
+class Scorrevole(ttk.Frame):
+    """Contenitore con barra di scorrimento verticale, che compare solo se il contenuto non ci sta.
+    I controlli vanno messi dentro self.interno."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        sfondo = ttk.Style(self).lookup("TFrame", "background") or None
+        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, background=sfondo)
+        self.barra = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.barra.set)
+        self.interno = ttk.Frame(self.canvas)
+        self._finestra = self.canvas.create_window(0, 0, window=self.interno, anchor="nw")
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        self.interno.bind("<Configure>", self._adatta)
+        self.canvas.bind("<Configure>", self._adatta)
+        # rotella del mouse: attiva solo mentre il puntatore è sopra il contenitore
+        self.bind("<Enter>", lambda e: self.bind_all("<MouseWheel>", self._rotella) or
+                  self.bind_all("<Button-4>", self._rotella) or self.bind_all("<Button-5>", self._rotella))
+        self.bind("<Leave>", lambda e: [self.unbind_all(s) for s in ("<MouseWheel>", "<Button-4>", "<Button-5>")])
+
+    def _adatta(self, _event=None):
+        # il canvas chiede la dimensione del contenuto, così su schermi grandi non serve scorrere
+        self.canvas.configure(width=self.interno.winfo_reqwidth(), height=self.interno.winfo_reqheight(),
+                              scrollregion=(0, 0, 0, self.interno.winfo_reqheight()))
+        self.canvas.itemconfigure(self._finestra, width=self.canvas.winfo_width())
+        if self.interno.winfo_reqheight() > self.canvas.winfo_height() > 1:
+            self.barra.grid(row=0, column=1, sticky="ns")
+        else:
+            self.barra.grid_remove()
+            self.canvas.yview_moveto(0)
+
+    def _rotella(self, event):
+        if self.barra.winfo_ismapped():
+            passi = -1 if getattr(event, "num", None) == 4 or event.delta > 0 else 1
+            self.canvas.yview_scroll(passi, "units")
+
+
+class Suggerimento:
+    """Spiegazione che compare tenendo il mouse fermo su un controllo per mezzo secondo."""
+
+    def __init__(self, widget, testo, attesa_ms=500):
+        self.widget, self.testo, self.attesa_ms = widget, testo, attesa_ms
+        self._timer = self._finestra = None
+        widget.bind("<Enter>", self._programma, add="+")
+        widget.bind("<Leave>", self._nascondi, add="+")
+        widget.bind("<ButtonPress>", self._nascondi, add="+")
+
+    def _programma(self, _event=None):
+        self._nascondi()
+        self._timer = self.widget.after(self.attesa_ms, self._mostra)
+
+    def _mostra(self):
+        self._timer = None
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self._finestra = tk.Toplevel(self.widget)
+        self._finestra.wm_overrideredirect(True)  # senza bordo né barra del titolo
+        self._finestra.wm_geometry(f"+{x}+{y}")
+        tk.Label(self._finestra, text=self.testo, justify="left", wraplength=440, padx=8, pady=5,
+                 background="#ffffe6", foreground="#1c1e21", relief="solid", borderwidth=1).pack()
+
+    def _nascondi(self, _event=None):
+        if self._timer:
+            self.widget.after_cancel(self._timer)
+            self._timer = None
+        if self._finestra:
+            self._finestra.destroy()
+            self._finestra = None
+
+
+def aiuto(testo, *widgets):
+    """Stessa spiegazione su più controlli (di solito l'etichetta e il campo accanto)."""
+    for w in widgets:
+        Suggerimento(w, testo)
+
+
+def mostra_guida(parent):
+    """Finestra con la guida all'uso e il significato dei termini (testo in GUIDA)."""
+    w = tk.Toplevel(parent)
+    w.title("Guida")
+    w.geometry("760x620")
+    t = ScrolledText(w, wrap="word", font=("", 10), padx=14, pady=10, spacing2=2)
+    t.pack(fill="both", expand=True)
+    t.tag_config("titolo", font=("", 12, "bold"), spacing1=10, spacing3=4)
+    for titolo, testo in GUIDA:
+        t.insert("end", titolo + "\n", "titolo")
+        t.insert("end", testo + "\n")
+    t.config(state="disabled")
+    ttk.Button(w, text="Chiudi", command=w.destroy).pack(pady=6)
 
 
 # ============================================================ scheda 1: scarica
@@ -77,23 +231,30 @@ class SchedaScarica(ttk.Frame):
     def _costruisci(self):
         self.columnconfigure(0, weight=3)
         self.columnconfigure(1, weight=2)
-        self.rowconfigure(1, weight=1)
 
         # ① anno e sede
         s1 = Sezione(self, "① Anno accademico e sede")
         s1.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-        ttk.Label(s1, text="Anno accademico").grid(row=0, column=0, sticky="w")
+        lbl = ttk.Label(s1, text="Anno accademico")
+        lbl.grid(row=0, column=0, sticky="w")
         self.cb_aa = ttk.Combobox(s1, state="readonly", width=14, values=[VUOTO])
         self.cb_aa.grid(row=0, column=1, padx=(6, 18))
-        ttk.Label(s1, text="Sede").grid(row=0, column=2, sticky="w")
+        aiuto("L'anno accademico dei manifesti da leggere. L'elenco arriva direttamente dal sito.", lbl, self.cb_aa)
+        lbl = ttk.Label(s1, text="Sede")
+        lbl.grid(row=0, column=2, sticky="w")
         self.cb_sede = ttk.Combobox(s1, state="readonly", width=26, values=[VUOTO])
         self.cb_sede.grid(row=0, column=3, padx=(6, 18))
-        ttk.Label(s1, text="Tipo di laurea").grid(row=0, column=4, sticky="w")
+        aiuto("La sede (città) dei corsi. Scegliendo una sede vengono scaricati solo i piani di studio "
+              "erogati lì, salvo diversa scelta in «Cosa includere».", lbl, self.cb_sede)
+        lbl = ttk.Label(s1, text="Tipo di laurea")
+        lbl.grid(row=0, column=4, sticky="w")
         self.cb_tipo = ttk.Combobox(s1, state="readonly", width=30, values=[TUTTI_TIPI])
         self.cb_tipo.set(TUTTI_TIPI)
         self.cb_tipo.grid(row=0, column=5, padx=(6, 18))
         self.cb_tipo.bind("<<ComboboxSelected>>", lambda e: self._riempi_albero())
-        self.lbl_stato = ttk.Label(s1, text="Collegamento al sito…", foreground="#666")
+        aiuto("Mostra solo i corsi di un tipo (es. Laurea Magistrale). Vengono scaricati solo i corsi "
+              "selezionati di questo tipo: quelli spuntati ma di un altro tipo restano esclusi.", lbl, self.cb_tipo)
+        self.lbl_stato = ttk.Label(s1, text="Collegamento al sito…", foreground=GRIGIO)
         self.lbl_stato.grid(row=0, column=6, sticky="w")
         for cb in (self.cb_aa, self.cb_sede):
             cb.bind("<<ComboboxSelected>>", lambda e: self._carica_corsi())
@@ -103,11 +264,17 @@ class SchedaScarica(ttk.Frame):
         s2.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
         s2.columnconfigure(1, weight=1)
         s2.rowconfigure(1, weight=1)
-        ttk.Label(s2, text="Cerca").grid(row=0, column=0, sticky="w")
+        lbl = ttk.Label(s2, text="Cerca")
+        lbl.grid(row=0, column=0, sticky="w")
         self.var_cerca = tk.StringVar()
         self.var_cerca.trace_add("write", lambda *a: self._riempi_albero())
-        ttk.Entry(s2, textvariable=self.var_cerca).grid(row=0, column=1, sticky="ew", padx=6)
-        ttk.Button(s2, text="Seleziona visibili", command=lambda: self._seleziona_visibili(True)).grid(row=0, column=2)
+        e = ttk.Entry(s2, textvariable=self.var_cerca)
+        e.grid(row=0, column=1, sticky="ew", padx=6)
+        aiuto("Filtra l'elenco per nome, codice o scuola (es. «informatica»). Serve solo a trovare i corsi: "
+              "quelli già selezionati restano selezionati anche se non si vedono.", lbl, e)
+        b = ttk.Button(s2, text="Seleziona visibili", command=self._seleziona_visibili)
+        b.grid(row=0, column=2)
+        aiuto("Seleziona tutti i corsi che si vedono ora nell'elenco (per esempio dopo una ricerca).", b)
         ttk.Button(s2, text="Deseleziona tutti", command=self._deseleziona_tutti).grid(row=0, column=3, padx=(4, 0))
         fr = ttk.Frame(s2)
         fr.grid(row=1, column=0, columnspan=4, sticky="nsew", pady=6)
@@ -128,93 +295,139 @@ class SchedaScarica(ttk.Frame):
         self.lbl_sel.grid(row=2, column=0, columnspan=4, sticky="w")
 
         # ③ opzioni
-        s3 = Sezione(self, "③ Cosa includere")
-        s3.grid(row=1, column=1, sticky="nsew")
+        riquadro = Sezione(self, "③ Cosa includere")
+        riquadro.grid(row=1, column=1, sticky="nsew")
+        riquadro.columnconfigure(0, weight=1)
+        riquadro.rowconfigure(0, weight=1)
+        scorrevole = Scorrevole(riquadro)  # su schermi bassi le opzioni non ci stanno tutte
+        scorrevole.grid(row=0, column=0, sticky="nsew")
+        s3 = scorrevole.interno
         s3.columnconfigure(0, weight=1)
         r = 0
 
-        ttk.Label(s3, text="Anni di corso", font=("", 9, "bold")).grid(row=r, column=0, sticky="w"); r += 1
+        def titolo(testo, spiegazione):
+            nonlocal r
+            lbl = ttk.Label(s3, text=testo, font=("", 9, "bold"))
+            lbl.grid(row=r, column=0, sticky="w", pady=(8 if r else 0, 0))
+            aiuto(spiegazione, lbl)
+            r += 1
+
+        def casella(parent, testo, var, spiegazione, **grid):
+            cb = ttk.Checkbutton(parent, text=testo, variable=var, command=grid.pop("command", None))
+            cb.grid(**grid)
+            aiuto(spiegazione, cb)
+
+        titolo("Anni di corso", "Di quali anni di corso scaricare gli insegnamenti.")
         f = ttk.Frame(s3); f.grid(row=r, column=0, sticky="w"); r += 1
         self.var_anni = {}
         for i, a in enumerate(["1", "2", "3", "4", "5", "6"]):
             v = tk.BooleanVar()
-            ttk.Checkbutton(f, text=f"{a}°", variable=v, command=self._anni_cambiati).grid(row=0, column=i, padx=(0, 6))
+            casella(f, f"{a}°", v, f"Gli insegnamenti del {a}° anno. Se un corso non ha questo anno "
+                    "(es. 4° anno di una laurea triennale) viene saltato.",
+                    command=self._anni_cambiati, row=0, column=i, padx=(0, 6))
             self.var_anni[a] = v
         self.var_anni_tutti = tk.BooleanVar()
-        ttk.Checkbutton(f, text="Tutti insieme", variable=self.var_anni_tutti,
-                        command=self._anni_tutti_cambiato).grid(row=0, column=6, padx=(6, 0))
+        casella(f, "Tutti insieme", self.var_anni_tutti,
+                "Tutti gli anni di corso con una sola lettura per piano: è più veloce che spuntarli uno per uno. "
+                "L'anno di ogni insegnamento resta indicato nella colonna «Anno».",
+                command=self._anni_tutti_cambiato, row=0, column=6, padx=(6, 0))
 
-        ttk.Label(s3, text="Periodo didattico", font=("", 9, "bold")).grid(row=r, column=0, sticky="w", pady=(8, 0)); r += 1
+        titolo("Periodo didattico", "Tiene solo gli insegnamenti che si svolgono nei periodi spuntati.")
         f = ttk.Frame(s3); f.grid(row=r, column=0, sticky="w"); r += 1
         self.var_periodi = {}
+        spiegazioni = {"annuale": "Insegnamenti che durano tutto l'anno (entrambi i semestri).",
+                       "1sem": "Insegnamenti del primo semestre (circa settembre–gennaio).",
+                       "2sem": "Insegnamenti del secondo semestre (circa febbraio–luglio).",
+                       "altro": "Periodi diversi dai precedenti, se il sito ne indica (es. corsi brevi)."}
         for i, (k, t) in enumerate(ps.PERIODI.items()):
             v = tk.BooleanVar()
-            ttk.Checkbutton(f, text=t, variable=v).grid(row=0, column=i, padx=(0, 8))
+            casella(f, t, v, spiegazioni[k], row=0, column=i, padx=(0, 8))
             self.var_periodi[k] = v
 
-        ttk.Label(s3, text="Piani di studio", font=("", 9, "bold")).grid(row=r, column=0, sticky="w", pady=(8, 0)); r += 1
+        titolo("Piani di studio", "Un corso può avere più piani di studio: varianti dello stesso corso "
+               "(es. in italiano o in inglese, o in un'altra sede), ognuna con i suoi insegnamenti.")
         self.var_piani = tk.StringVar(value="")
-        ttk.Radiobutton(s3, text="Tutti i piani della sede", value="tutti", variable=self.var_piani).grid(row=r, column=0, sticky="w"); r += 1
-        ttk.Radiobutton(s3, text="Solo il primo piano di ogni corso", value="primo", variable=self.var_piani).grid(row=r, column=0, sticky="w"); r += 1
+        for valore, testo, spiegazione in [
+                ("tutti", "Tutti i piani della sede", "Scarica tutti i piani di studio di ogni corso scelto."),
+                ("primo", "Solo il primo piano di ogni corso",
+                 "Un solo piano per corso (il primo dell'elenco del sito): più veloce, utile per una prima occhiata.")]:
+            rb = ttk.Radiobutton(s3, text=testo, value=valore, variable=self.var_piani)
+            rb.grid(row=r, column=0, sticky="w"); r += 1
+            aiuto(spiegazione, rb)
         self.var_altre_sedi = tk.BooleanVar()
-        ttk.Checkbutton(s3, text="Tieni anche i piani erogati in altre sedi (es. Cremona)",
-                        variable=self.var_altre_sedi).grid(row=r, column=0, sticky="w"); r += 1
+        casella(s3, "Tieni anche i piani erogati in altre sedi (es. Cremona)", self.var_altre_sedi,
+                "Alcuni corsi hanno piani in più città. Normalmente si tengono solo quelli della sede scelta in "
+                "alto; con questa opzione si tengono tutti. I piani scartati sono comunque elencati nella tabella "
+                "«Corsi e piani».", row=r, column=0, sticky="w"); r += 1
         self.var_nondiv = tk.BooleanVar()
-        ttk.Checkbutton(s3, text="Includi l'offerta non diversificata (piano ***)",
-                        variable=self.var_nondiv).grid(row=r, column=0, sticky="w"); r += 1
+        casella(s3, "Includi il piano «***» (insegnamenti comuni a tutti i piani)", self.var_nondiv,
+                "Sul sito il piano «***» (offerta non diversificata) elenca gli insegnamenti non legati a un "
+                "piano specifico, uguali per tutti. Normalmente non viene scaricato: spunta per includerlo.",
+                row=r, column=0, sticky="w"); r += 1
 
-        ttk.Label(s3, text="Dettagli da scaricare", font=("", 9, "bold")).grid(row=r, column=0, sticky="w", pady=(8, 0)); r += 1
+        titolo("Dettagli da scaricare", "Oltre all'elenco degli insegnamenti, cosa leggere dalla pagina di "
+               "ognuno. Ogni insegnamento richiede una o due pagine in più: è la parte che richiede più tempo.")
         self.var_scaglioni = tk.BooleanVar()
         self.var_orari = tk.BooleanVar()
-        ttk.Checkbutton(s3, text="Scaglioni (lettere, docenti, moduli)", variable=self.var_scaglioni,
-                        command=self._dettagli_cambiati).grid(row=r, column=0, sticky="w"); r += 1
-        ttk.Checkbutton(s3, text="Orario delle lezioni (giorni, ore, aule)", variable=self.var_orari,
-                        command=lambda: self.var_orari.get() and self.var_scaglioni.set(True)).grid(row=r, column=0, sticky="w"); r += 1
+        casella(s3, "Scaglioni (lettere, docenti, moduli)", self.var_scaglioni,
+                "Per ogni insegnamento, i gruppi di studenti divisi per iniziale del cognome, con i docenti "
+                "di ciascun gruppo.", command=self._dettagli_cambiati, row=r, column=0, sticky="w"); r += 1
+        casella(s3, "Orario delle lezioni (giorni, ore, aule)", self.var_orari,
+                "L'orario settimanale di ogni scaglione: giorno, ora, aula, date. Richiede gli scaglioni, "
+                "che vengono spuntati da sé.", command=self._orari_cambiati, row=r, column=0, sticky="w"); r += 1
         ttk.Label(s3, text="Senza dettagli si ottiene solo l'elenco degli insegnamenti (molto più veloce).",
-                  foreground="#666", wraplength=380).grid(row=r, column=0, sticky="w"); r += 1
+                  foreground=GRIGIO, wraplength=520).grid(row=r, column=0, sticky="w"); r += 1
 
-        ttk.Label(s3, text="Avanzate", font=("", 9, "bold")).grid(row=r, column=0, sticky="w", pady=(8, 0)); r += 1
-        f = ttk.Frame(s3); f.grid(row=r, column=0, sticky="w"); r += 1
+        # impostazioni che servono di rado: in una finestra a parte (vedi _avanzate)
         self.var_cache = tk.BooleanVar(value=True)
-        ttk.Checkbutton(f, text="Riusa le pagine già scaricate", variable=self.var_cache).grid(row=0, column=0)
-        ttk.Button(f, text="Svuota cache", command=self._svuota_cache).grid(row=0, column=1, padx=8)
-        f = ttk.Frame(s3); f.grid(row=r, column=0, sticky="w"); r += 1
-        ttk.Label(f, text="Pausa tra le richieste (secondi)").grid(row=0, column=0)
         self.var_delay = tk.DoubleVar(value=0.4)
-        ttk.Spinbox(f, from_=0.1, to=5, increment=0.1, width=5, textvariable=self.var_delay).grid(row=0, column=1, padx=6)
-        ttk.Label(f, text="Richieste in parallelo").grid(row=0, column=2, padx=(10, 0))
         self.var_paralleli = tk.IntVar(value=ps.PARALLELI_DEFAULT)
-        ttk.Spinbox(f, from_=1, to=8, increment=1, width=4, textvariable=self.var_paralleli).grid(row=0, column=3, padx=6)
-        self.lbl_cache = ttk.Label(s3, foreground="#666")
-        self.lbl_cache.grid(row=r, column=0, sticky="w"); r += 1
+        f = ttk.Frame(s3); f.grid(row=r, column=0, sticky="w", pady=(10, 0)); r += 1
+        b = ttk.Button(f, text="Impostazioni avanzate…", command=self._avanzate)
+        b.grid(row=0, column=0)
+        aiuto("Cache delle pagine già scaricate, pausa tra le richieste e richieste in parallelo. "
+              "Di solito non serve cambiarle.", b)
+        self.lbl_cache = ttk.Label(f, foreground=GRIGIO)
+        self.lbl_cache.grid(row=0, column=1, padx=8)
         self._aggiorna_info_cache()
 
         # ④ avvio
         s4 = Sezione(self, "④ Scarica")
         s4.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
         s4.columnconfigure(1, weight=1)
-        ttk.Label(s4, text="Salva in").grid(row=0, column=0, sticky="w")
+        lbl = ttk.Label(s4, text="Salva in")
+        lbl.grid(row=0, column=0, sticky="w")
         self.var_out = tk.StringVar()
-        ttk.Entry(s4, textvariable=self.var_out).grid(row=0, column=1, sticky="ew", padx=6)
+        e = ttk.Entry(s4, textvariable=self.var_out)
+        e.grid(row=0, column=1, sticky="ew", padx=6)
+        aiuto("Il file di dati (.json) in cui salvare il risultato. Se lo lasci vuoto viene creato un file "
+              "nuovo nella cartella output, con anno, sede, data e ora nel nome.", lbl, e)
         ttk.Button(s4, text="Sfoglia…", command=self._scegli_out).grid(row=0, column=2)
-        ttk.Label(s4, text="(vuoto = nome automatico nella cartella output)", foreground="#666").grid(row=0, column=3, padx=6)
+        ttk.Label(s4, text="(vuoto = nome automatico nella cartella output)", foreground=GRIGIO).grid(row=0, column=3, padx=6)
         f = ttk.Frame(s4); f.grid(row=1, column=0, columnspan=4, sticky="ew", pady=6)
         f.columnconfigure(3, weight=1)
         self.btn_avvia = ttk.Button(f, text="▶  Avvia scaricamento", style="Accent.TButton", command=self._avvia)
         self.btn_avvia.grid(row=0, column=0, ipadx=10, ipady=3)
+        aiuto("Controlla le scelte, mostra un riepilogo da confermare e avvia lo scaricamento.", self.btn_avvia)
         self.btn_stop = ttk.Button(f, text="■  Interrompi", command=self._interrompi, state="disabled")
         self.btn_stop.grid(row=0, column=1, padx=8)
+        aiuto("Ferma lo scaricamento. I dati raccolti fino a questo momento vengono salvati comunque.", self.btn_stop)
         self.lbl_prog = ttk.Label(f, text="", width=58)
         self.lbl_prog.grid(row=0, column=2, padx=8)
         self.pbar = ttk.Progressbar(f, mode="determinate")
         self.pbar.grid(row=0, column=3, sticky="ew")
-        self.log = ScrolledText(s4, height=8, font=("Consolas" if sys.platform.startswith("win") else "Monospace", 9),
+        self.log = ScrolledText(s4, height=6, font=("Consolas" if sys.platform.startswith("win") else "Monospace", 9),
                                 state="disabled", wrap="none")
         self.log.grid(row=2, column=0, columnspan=4, sticky="nsew")
         s4.rowconfigure(2, weight=1)
 
+        # lo spazio in più (o in meno) va soprattutto a corsi e opzioni, meno al registro
+        self.rowconfigure(1, weight=3)
+        self.rowconfigure(2, weight=1)
+
     # ---------------------------------------------------------------- catalogo
     def _in_thread(self, funzione, fine):
+        """Esegue funzione() in un thread; poi, nel thread della finestra, fine(risultato, errore)."""
         def run():
             try:
                 self.q.put(("fine", fine, funzione(), None))
@@ -230,7 +443,7 @@ class SchedaScarica(ttk.Frame):
 
     def _opzioni_caricate(self, res, err):
         if err:
-            self.lbl_stato.config(text="Sito non raggiungibile: controlla la connessione", foreground="#b00020")
+            self.lbl_stato.config(text="Sito non raggiungibile: controlla la connessione", foreground=ROSSO)
             messagebox.showerror("Errore di connessione", f"Impossibile raggiungere il sito dei manifesti.\n\n{err}")
             return
         anni, sedi = res
@@ -240,13 +453,13 @@ class SchedaScarica(ttk.Frame):
         self.cb_sede.config(values=list(self.map_sede))
         self.cb_aa.set(VUOTO)
         self.cb_sede.set(VUOTO)
-        self.lbl_stato.config(text="Scegli anno accademico e sede", foreground="#666")
+        self.lbl_stato.config(text="Scegli anno accademico e sede", foreground=GRIGIO)
 
     def _carica_corsi(self):
         aa, sede = self.map_aa.get(self.cb_aa.get()), self.map_sede.get(self.cb_sede.get())
         if not (aa and sede):
             return
-        self.lbl_stato.config(text="Carico l'elenco dei corsi…", foreground="#666")
+        self.lbl_stato.config(text="Carico l'elenco dei corsi…", foreground=GRIGIO)
         self.catalogo = None
         self._riempi_albero()
         self.n_richiesta_corsi += 1
@@ -257,7 +470,7 @@ class SchedaScarica(ttk.Frame):
         if n_richiesta != self.n_richiesta_corsi:
             return  # nel frattempo l'utente ha cambiato anno o sede
         if err:
-            self.lbl_stato.config(text="Errore nel caricare i corsi", foreground="#b00020")
+            self.lbl_stato.config(text="Errore nel caricare i corsi", foreground=ROSSO)
             messagebox.showerror("Errore", str(err))
             return
         self.catalogo = cat
@@ -268,7 +481,7 @@ class SchedaScarica(ttk.Frame):
         validi = {c["codice"] for s in cat["scuole"] for c in s["corsi"]}
         self.selezionati &= validi
         n = len(validi)
-        self.lbl_stato.config(text=f"{n} corsi disponibili", foreground="#1b7f3b")
+        self.lbl_stato.config(text=f"{n} corsi disponibili", foreground=VERDE)
         self._riempi_albero()
 
     # ---------------------------------------------------------------- albero
@@ -362,7 +575,7 @@ class SchedaScarica(ttk.Frame):
         self._aggiorna_spunte()
         return "break"
 
-    def _seleziona_visibili(self, on):
+    def _seleziona_visibili(self):
         self.selezionati |= {c["codice"] for _, c in self._corsi_visibili()}
         self._aggiorna_spunte()
 
@@ -371,6 +584,8 @@ class SchedaScarica(ttk.Frame):
         self._aggiorna_spunte()
 
     # ---------------------------------------------------------------- opzioni
+    # «Tutti insieme» e i singoli anni si escludono a vicenda: sono due modi diversi di chiedere
+    # gli anni al sito (una pagina con tutti gli anni, oppure una pagina per anno)
     def _anni_cambiati(self):
         if any(v.get() for v in self.var_anni.values()):
             self.var_anni_tutti.set(False)
@@ -380,14 +595,58 @@ class SchedaScarica(ttk.Frame):
             for v in self.var_anni.values():
                 v.set(False)
 
+    # l'orario è diviso per scaglione e si legge dalla stessa pagina: «Orario» porta con sé «Scaglioni»
     def _dettagli_cambiati(self):
         if not self.var_scaglioni.get():
             self.var_orari.set(False)
 
+    def _orari_cambiati(self):
+        if self.var_orari.get():
+            self.var_scaglioni.set(True)
+
     def _aggiorna_info_cache(self):
         n = len(list(CACHE.glob("*.html"))) if CACHE.exists() else 0
         mb = sum(f.stat().st_size for f in CACHE.glob("*.html")) / 1e6 if n else 0
-        self.lbl_cache.config(text=f"Cache: {n} pagine salvate ({mb:.0f} MB). Svuotala per avere dati aggiornati.")
+        self.lbl_cache.config(text=f"Cache: {n} pagine già scaricate ({mb:.0f} MB)")
+
+    def _avanzate(self):
+        """Finestra con le impostazioni che servono di rado. Le variabili (var_cache, var_delay,
+        var_paralleli) appartengono alla scheda, così le scelte restano anche chiudendo la finestra."""
+        w = tk.Toplevel(self)
+        w.title("Impostazioni avanzate")
+        w.transient(self.winfo_toplevel())
+        fr = ttk.Frame(w, padding=14)
+        fr.pack(fill="both", expand=True)
+        ttk.Label(fr, text="Di solito non serve cambiare queste impostazioni.", foreground=GRIGIO).grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+
+        ttk.Label(fr, text="Pagine già scaricate (cache)", font=("", 9, "bold")).grid(row=1, column=0, sticky="w")
+        cb = ttk.Checkbutton(fr, text="Riusa le pagine già scaricate", variable=self.var_cache)
+        cb.grid(row=2, column=0, columnspan=2, sticky="w")
+        aiuto("Le pagine lette dal sito restano salvate (cartella cache): ripetere o ampliare uno scaricamento "
+              "diventa immediato. Togli la spunta per rileggere tutto dal sito senza cancellare la cache.", cb)
+        b = ttk.Button(fr, text="Svuota cache", command=self._svuota_cache)
+        b.grid(row=2, column=2, padx=(12, 0))
+        aiuto("Cancella le pagine salvate. Usalo quando vuoi essere sicuro di avere i dati aggiornati dal sito.", b)
+        ttk.Label(fr, text="Se il sito è stato aggiornato, svuota la cache per avere i dati nuovi.",
+                  foreground=GRIGIO).grid(row=3, column=0, columnspan=3, sticky="w")
+
+        ttk.Label(fr, text="Velocità", font=("", 9, "bold")).grid(row=4, column=0, sticky="w", pady=(12, 0))
+        lbl = ttk.Label(fr, text="Pausa tra le richieste (secondi)")
+        lbl.grid(row=5, column=0, sticky="w")
+        sp = ttk.Spinbox(fr, from_=0.1, to=5, increment=0.1, width=5, textvariable=self.var_delay)
+        sp.grid(row=5, column=1, sticky="w", padx=6, pady=2)
+        aiuto("Attesa prima di ogni richiesta al sito, per non sovraccaricarlo. Aumentala se il sito "
+              "risponde con errori.", lbl, sp)
+        lbl = ttk.Label(fr, text="Richieste in parallelo")
+        lbl.grid(row=6, column=0, sticky="w")
+        sp = ttk.Spinbox(fr, from_=1, to=8, increment=1, width=5, textvariable=self.var_paralleli)
+        sp.grid(row=6, column=1, sticky="w", padx=6, pady=2)
+        aiuto(f"Quante pagine chiedere al sito contemporaneamente (normale: {ps.PARALLELI_DEFAULT}). "
+              "Di più è più veloce ma pesa di più sul sito; 1 = una alla volta.", lbl, sp)
+
+        ttk.Button(fr, text="Chiudi", command=w.destroy).grid(row=7, column=2, sticky="e", pady=(14, 0))
+        w.grab_set()
 
     def _svuota_cache(self):
         if self.in_corso():
@@ -454,9 +713,39 @@ class SchedaScarica(ttk.Frame):
         self.log.see("end")
         self.log.config(state="disabled")
 
+    def _riepilogo_scelte(self, opt):
+        """Le scelte dell'utente in parole, da confermare prima di partire."""
+        # con codice, tipo e ordinamento: lo stesso nome può comparire più volte
+        # (es. Ingegneria Informatica ord. 96/23 e ord. 270, oppure laurea e magistrale)
+        nomi = {c["codice"]: f"{c['nome']} · {c['gruppo']}" for s in self.catalogo["scuole"] for c in s["corsi"]}
+        corsi = [nomi.get(c, c) for c in opt.corsi]
+        elenco = "\n".join(f"      – {n}" for n in corsi[:8])
+        if len(corsi) > 8:
+            elenco += f"\n      … e altri {len(corsi) - 8}"
+        anni = "tutti" if opt.anni_corso == ["0"] else ", ".join(f"{a}°" for a in opt.anni_corso)
+        periodi = "tutti" if opt.periodi is None else ", ".join(t for k, t in ps.PERIODI.items() if k in opt.periodi)
+        piani = "tutti i piani" if opt.piani == "tutti" else "solo il primo piano di ogni corso"
+        if opt.sede != "ALL_SEDI":
+            piani += ", anche di altre sedi" if opt.includi_altre_sedi else ", solo quelli della sede scelta"
+        if opt.includi_non_diversificato:
+            piani += ", più il piano «***»"
+        dettagli = ("scaglioni e orario delle lezioni" if opt.orari else "scaglioni (senza orario)"
+                    if opt.scaglioni else "nessuno: solo l'elenco degli insegnamenti")
+        cache = ("le pagine già scaricate in passato verranno riusate" if opt.cache
+                 else "tutte le pagine verranno rilette dal sito")
+        return (f"Stai per scaricare:\n\n"
+                f"  • {len(corsi)} {'corso' if len(corsi) == 1 else 'corsi'} di studio:\n{elenco}\n"
+                f"  • anno accademico {self.cb_aa.get()}, sede {self.cb_sede.get()}\n"
+                f"  • anni di corso: {anni}\n"
+                f"  • periodi: {periodi}\n"
+                f"  • piani: {piani}\n"
+                f"  • dettagli: {dettagli}\n\n"
+                f"Nota: {cache}. Puoi interrompere in qualsiasi momento senza perdere i dati raccolti.\n\n"
+                f"Avviare lo scaricamento?")
+
     def _avvia(self):
         opt = self._opzioni()
-        if not opt:
+        if not opt or not messagebox.askyesno("Conferma", self._riepilogo_scelte(opt)):
             return
         self.log.config(state="normal")
         self.log.delete("1.0", "end")
@@ -589,14 +878,17 @@ class SchedaEsplora(ttk.Frame):
         s1 = Sezione(self, "① File di dati")
         s1.grid(row=0, column=0, sticky="ew")
         s1.columnconfigure(1, weight=1)
-        ttk.Label(s1, text="File").grid(row=0, column=0)
+        lbl = ttk.Label(s1, text="File")
+        lbl.grid(row=0, column=0)
         self.cb_file = ttk.Combobox(s1, state="readonly")
         self.cb_file.grid(row=0, column=1, sticky="ew", padx=6)
         self.cb_file.bind("<<ComboboxSelected>>", lambda e: self._carica_file())
+        aiuto("I file di dati creati dalla scheda 1, dal più recente. Il nome contiene anno accademico, "
+              "sede, data e ora dello scaricamento.", lbl, self.cb_file)
         ttk.Button(s1, text="Sfoglia…", command=self._sfoglia).grid(row=0, column=2)
         ttk.Button(s1, text="Aggiorna elenco", command=self.aggiorna_elenco).grid(row=0, column=3, padx=4)
         ttk.Button(s1, text="Apri cartella output", command=lambda: apri_percorso(OUTPUT)).grid(row=0, column=4)
-        self.lbl_file = ttk.Label(s1, foreground="#666")
+        self.lbl_file = ttk.Label(s1, foreground=GRIGIO)
         self.lbl_file.grid(row=1, column=0, columnspan=5, sticky="w", pady=(4, 0))
 
         s2 = Sezione(self, "② Tabella e filtri")
@@ -605,9 +897,11 @@ class SchedaEsplora(ttk.Frame):
         f.grid(row=0, column=0, columnspan=8, sticky="w")
         self.var_tab = tk.StringVar(value="")
         for i, (k, t) in enumerate(NOMI_TABELLE.items()):
-            ttk.Radiobutton(f, text=t, value=k, variable=self.var_tab, command=self._tabella_cambiata).grid(row=0, column=i, padx=(0, 14))
-        self.lbl_desc = ttk.Label(f, foreground="#666")
-        self.lbl_desc.grid(row=0, column=len(NOMI_TABELLE), padx=8)
+            rb = ttk.Radiobutton(f, text=t, value=k, variable=self.var_tab, command=self._tabella_cambiata)
+            rb.grid(row=0, column=i, padx=(0, 14))
+            aiuto(ex.DESCRIZIONI[k] + ".", rb)
+        self.lbl_desc = ttk.Label(f, foreground=GRIGIO)
+        self.lbl_desc.grid(row=1, column=0, columnspan=len(NOMI_TABELLE), sticky="w", pady=(2, 4))
 
         self.cb_filtri = {}
         self.lbl_filtri = {}
@@ -619,23 +913,37 @@ class SchedaEsplora(ttk.Frame):
             cb.set(TUTTI)
             cb.grid(row=r, column=c + 1, sticky="ew", padx=(0, 14), pady=3)
             cb.bind("<<ComboboxSelected>>", lambda e, col=col: self._filtro_cambiato(col))
+            aiuto(f"Mostra solo le righe con questo valore di «{nome}». I filtri si sommano, e ogni menu propone "
+                  "solo i valori ancora possibili con i filtri che lo precedono. Un menu grigio vuol dire "
+                  "che la tabella scelta non ha questa colonna.", lbl, cb)
             self.cb_filtri[col], self.lbl_filtri[col] = cb, lbl
         for c in (1, 3, 5, 7):
             s2.columnconfigure(c, weight=1)
         f = ttk.Frame(s2)
         f.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(4, 0))
         f.columnconfigure(1, weight=1)
-        ttk.Label(f, text="Cerca testo").grid(row=0, column=0)
+        lbl = ttk.Label(f, text="Cerca testo")
+        lbl.grid(row=0, column=0)
         self.var_cerca = tk.StringVar()
         e = ttk.Entry(f, textvariable=self.var_cerca)
         e.grid(row=0, column=1, sticky="ew", padx=6)
+        aiuto("Tiene le righe che contengono il testo in una colonna qualsiasi, senza distinguere maiuscole. "
+              "Con più parole, devono esserci tutte (es. «analisi lunedì»).", lbl, e)
         self._timer = None
         self.var_cerca.trace_add("write", lambda *a: self._rinvia_aggiornamento())
         self.var_unisci = tk.BooleanVar()
-        ttk.Checkbutton(f, text="Una riga sola per ciò che si ripete in più corsi (unisce i doppioni)", variable=self.var_unisci,
-                        command=self._aggiorna_anteprima).grid(row=0, column=2, padx=8)
-        ttk.Button(f, text="Colonne…", command=self._scegli_colonne).grid(row=0, column=3)
-        ttk.Button(f, text="Azzera filtri", command=self._azzera_filtri).grid(row=0, column=4, padx=(6, 0))
+        cb = ttk.Checkbutton(f, text="Una riga sola per ciò che si ripete in più corsi (unisce i doppioni)",
+                             variable=self.var_unisci, command=self._aggiorna_anteprima)
+        cb.grid(row=0, column=2, padx=8)
+        aiuto("Lo stesso insegnamento (o scaglione, o lezione) può comparire in più corsi e piani di studio. "
+              "Con questa opzione resta una riga sola, e le colonne Corso e Piano elencano tutti i corsi "
+              "separati da «|». Vale anche per i file salvati.", cb)
+        b = ttk.Button(f, text="Colonne…", command=self._scegli_colonne)
+        b.grid(row=0, column=3)
+        aiuto("Scegli quali colonne mostrare e salvare.", b)
+        b = ttk.Button(f, text="Azzera filtri", command=self._azzera_filtri)
+        b.grid(row=0, column=4, padx=(6, 0))
+        aiuto("Rimette tutti i filtri su «(tutti)» e svuota la ricerca.", b)
 
         s3 = Sezione(self, "③ Anteprima (clic su un'intestazione per ordinare)")
         s3.grid(row=3, column=0, sticky="nsew")
@@ -655,16 +963,33 @@ class SchedaEsplora(ttk.Frame):
 
         s4 = Sezione(self, "④ Salva le righe filtrate")
         s4.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-        for i, (fmt, testo) in enumerate([("xlsx", "Excel (.xlsx)"), ("csv", "CSV (.csv)"),
-                                          ("html", "Pagina web (.html)"), ("json", "JSON (.json)")]):
-            ttk.Button(s4, text=testo, command=lambda f=fmt: self._esporta(f)).grid(row=0, column=i, padx=(0, 6))
-        ttk.Button(s4, text="Excel con tutte le tabelle", command=self._esporta_tutte).grid(row=0, column=4, padx=(12, 6))
+        formati = [
+            ("xlsx", "Excel (.xlsx)", "La tabella che vedi, in un foglio Excel con intestazioni e filtri."),
+            ("csv", "CSV (.csv)", "Testo separato da «;»: si apre direttamente in Excel italiano e in "
+                                  "qualunque foglio di calcolo."),
+            ("html", "Pagina web (.html)", "Una pagina da aprire nel browser, con ricerca e ordinamento per colonna."),
+            ("json", "JSON (.json)", "Formato per programmi: una lista di righe con le colonne scelte."),
+        ]
+        for i, (fmt, testo, spiegazione) in enumerate(formati):
+            b = ttk.Button(s4, text=testo, command=lambda f=fmt: self._esporta(f))
+            b.grid(row=0, column=i, padx=(0, 6))
+            aiuto(spiegazione + " Salva solo le righe e le colonne che vedi nell'anteprima.", b)
+        b = ttk.Button(s4, text="Excel con tutte le tabelle", command=self._esporta_tutte)
+        b.grid(row=0, column=4, padx=(12, 6))
+        aiuto("Un file Excel con un foglio per ogni tabella (Insegnamenti, Scaglioni, …), "
+              "con gli stessi filtri applicati a ciascuna.", b)
         ttk.Separator(s4, orient="vertical").grid(row=0, column=5, sticky="ns", padx=10)
-        ttk.Label(s4, text="Orario settimanale:").grid(row=0, column=6)
+        lbl = ttk.Label(s4, text="Orario settimanale:")
+        lbl.grid(row=0, column=6)
         self.cb_cal = ttk.Combobox(s4, state="readonly", width=46, values=list(ex.RAGGRUPPA.values()))
         self.cb_cal.set(VUOTO)
         self.cb_cal.grid(row=0, column=7, padx=6)
-        ttk.Button(s4, text="Crea calendario", command=self._calendario).grid(row=0, column=8)
+        b = ttk.Button(s4, text="Crea calendario", command=self._calendario)
+        b.grid(row=0, column=8)
+        aiuto("Una pagina web con griglie settimanali Lunedì–Venerdì, da stampare o salvare in PDF dal browser. "
+              "Scegli nel menu come dividere le lezioni in griglie: per esempio «per fascia di cognomi» dà "
+              "l'orario completo di uno studente. Usa le lezioni che rispettano i filtri attuali.",
+              lbl, self.cb_cal, b)
 
     # ---------------------------------------------------------------- file
     def aggiorna_elenco(self, select=None):
@@ -853,7 +1178,7 @@ class SchedaEsplora(ttk.Frame):
             return
         w = tk.Toplevel(self)
         w.title("Colonne da mostrare e salvare")
-        w.transient(self)
+        w.transient(self.winfo_toplevel())
         vars_ = {}
         fr = ttk.Frame(w, padding=10)
         fr.pack(fill="both", expand=True)
@@ -1002,15 +1327,32 @@ class App(tk.Tk):
         w, h = min(1400, self.winfo_screenwidth() - 60), min(900, self.winfo_screenheight() - 100)
         self.geometry(f"{w}x{h}+20+20")
         self.minsize(1000, 640)
+
+        # in alto: cosa fa il programma, come si usa, dove trovare la guida
+        testa = ttk.Frame(self, padding=(12, 8, 12, 0))
+        testa.pack(fill="x")
+        testa.columnconfigure(0, weight=1)
+        ttk.Label(testa, text=COSA_FA_BREVE, wraplength=w - 200, justify="left",
+                  font=("", 10, "bold")).grid(row=0, column=0, sticky="w")
+        passi = ("Come si usa: 1 · scegli cosa scaricare e avvia  →  2 · consulta i dati e salvali.   "
+                 "Mouse fermo su un'opzione = spiegazione.")
+        if self._ci_sono_dati():
+            passi += "   Hai già dei dati: puoi andare subito alla scheda 2."
+        ttk.Label(testa, text=passi, foreground=GRIGIO, wraplength=w - 200,
+                  justify="left").grid(row=1, column=0, sticky="w", pady=(2, 0))
+        ttk.Button(testa, text="❓ Guida", command=lambda: mostra_guida(self)).grid(row=0, column=1, rowspan=2,
+                                                                                  padx=(12, 0))
+
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=6, pady=6)
         self.scarica = SchedaScarica(self, self.nb)
         self.esplora = SchedaEsplora(self, self.nb)
         self.nb.add(self.scarica, text="  1 · Scarica dati dal sito  ")
         self.nb.add(self.esplora, text="  2 · Esplora ed esporta  ")
-        if self.esplora.files:
-            ttk.Label(self, text="Hai già dei dati scaricati: puoi passare direttamente alla scheda 2.",
-                      foreground="#666").pack(anchor="w", padx=12, pady=(0, 6))
+
+    @staticmethod
+    def _ci_sono_dati():
+        return OUTPUT.exists() and any(OUTPUT.glob("*.json"))
 
     def _stile(self):
         st = ttk.Style(self)

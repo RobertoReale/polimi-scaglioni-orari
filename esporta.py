@@ -2,6 +2,14 @@
 """
 Esportazione dei dati scaricati (file JSON in output/) in tabelle leggibili.
 
+PERCORSO DEI DATI
+    carica(file)          il JSON prodotto da scarica_manifesti.py
+      -> tabelle(dati)    le cinque tabelle qui sotto: liste di righe (dict colonna -> valore)
+      -> filtra(...)      tiene solo le righe scelte dall'utente
+      -> unisci_duplicati facoltativo: una riga sola per ciò che si ripete in più corsi/piani
+      -> esporta(...)     Excel, CSV, HTML, JSON; oppure esporta_calendario() per l'orario settimanale
+    Le colonne di ogni tabella e il loro ordine sono in COLONNE, i nomi leggibili in LABELS.
+
 Tabelle disponibili:
     insegnamenti   una riga per insegnamento di ogni piano (con n. scaglioni, docenti)
     scaglioni      una riga per scaglione di ogni insegnamento (orario: una colonna per giorno)
@@ -225,7 +233,10 @@ def _giorni_scaglione(lezioni, con_nome=False):
     return out
 
 
-_FINE = "￿"  # dopo qualunque cognome
+# Gli scaglioni sono intervalli di cognomi: "da" compreso, "a" escluso (es. BRU – CON = da BRU a prima di CON).
+# Per confrontarli come testo, l'inizio "A" diventa "" (prima di ogni cognome)
+# e la fine "ZZZZ" diventa _FINE (dopo ogni cognome).
+_FINE = "￿"
 
 
 def _da(v):
@@ -240,9 +251,16 @@ def _a(v):
 
 def gruppi_cognomi(lezioni):
     """Orario di chi ha il cognome in una certa fascia, con tutti gli insegnamenti del piano.
-    Ogni insegnamento divide i cognomi a modo suo (Analisi A–BRU, BRU–CON…; un altro A–M, M–Z):
-    le fasce sono gli intervalli tra tutti i confini, e per ogni fascia si prende da ogni insegnamento
-    lo scaglione che la contiene. Restituisce [((corso_codice, piano_codice, anno), nome_fascia, lezioni)]."""
+
+    Ogni insegnamento divide i cognomi a modo suo. Esempio, nello stesso piano:
+        Analisi    A–M, M–Z
+        Geometria  A–E, E–P, P–Z
+    I confini sono E, M, P: le fasce sono gli intervalli tra un confine e il successivo,
+        A–E  (Analisi A–M, Geometria A–E)     E–M  (Analisi A–M, Geometria E–P)
+        M–P  (Analisi M–Z, Geometria E–P)     P–Z  (Analisi M–Z, Geometria P–Z)
+    e per ogni fascia si prende, da ogni insegnamento, lo scaglione che la contiene tutta.
+    I piani (e gli anni di corso) sono trattati separatamente.
+    Restituisce [((corso_codice, piano_codice, anno), nome_fascia, lezioni della fascia)]."""
     piani = {}
     for lz in lezioni:
         piani.setdefault((lz.get("corso_codice"), lz.get("piano_codice"), lz.get("anno_corso")), []).append(lz)
@@ -270,82 +288,124 @@ def _periodo_lezioni(lezioni):
     return f"{min(dal):%d/%m/%Y} → {max(al):%d/%m/%Y}" if dal and al else ""
 
 
-def tabelle(dati):
-    """Dizionario {nome_tabella: lista di righe (dict)} dal JSON dello scraper."""
-    out = {k: [] for k in COLONNE}
-    for corso in dati.get("corsi_di_studio", []):
-        for piano in corso.get("piani", []):
-            ctx = _ctx(dati, corso, piano)
-            out["piani"].append({**ctx, "piano_lingua": piano.get("lingua"), "stato": "incluso",
-                                 "n_insegnamenti_totali": piano.get("n_insegnamenti_totali"),
-                                 "n_insegnamenti": len(piano.get("insegnamenti", []))})
-            for ins in piano.get("insegnamenti", []):
-                base = {**ctx, "codice": ins.get("codice"), "insegnamento": ins.get("nome"),
-                        "periodo": ins.get("periodo"), "cfu": _num(ins.get("cfu")), "url": ins.get("url_dettaglio")}
-                sezioni = ins.get("sezioni") or []
-                tutte_lez, tutti_doc, nomi_sc = [], [], []
-                for sez in sezioni:
-                    lez_sez = sez.get("orario") or []
-                    tutte_lez += lez_sez
-                    for sc in sez.get("scaglioni", []):
-                        nome_sc = _nome_scaglione(sc.get("da"), sc.get("a"))
-                        nomi_sc.append(nome_sc)
-                        tutti_doc += [d for d in sc.get("docenti", []) if d not in tutti_doc]
-                        lez_sc = [{**lz, "insegnamento": ins.get("nome")} for lz in lez_sez
-                                  if (lz.get("scaglione_da"), lz.get("scaglione_a")) == (sc.get("da"), sc.get("a"))]
-                        moduli = [r.get("modulo") for r in sc.get("righe", []) if r.get("modulo")]
-                        out["scaglioni"].append({
-                            **base, "sezione": sez.get("id_sezione"), "scaglione": nome_sc,
-                            "da": sc.get("da"), "a": sc.get("a"), "docenti": _lista(sc.get("docenti")),
-                            "moduli": "; ".join(dict.fromkeys(moduli)), "n_lezioni": len(lez_sc),
-                            "ore_settimanali": _ore(lez_sc),
-                            "orario": _sintesi_orario(lez_sc) or _nota_chiara(sez.get("orario_nota")),
-                            "aule": _aule(lez_sc),
-                            "periodo_lezioni": _periodo_lezioni(lez_sc), **_giorni_scaglione(lez_sc),
-                        })
-                    doc_sc = {(sc.get("da"), sc.get("a")): _lista(sc.get("docenti")) for sc in sez.get("scaglioni", [])}
-                    for lz in lez_sez:
-                        date = lz.get("date_lezioni") or []
-                        out["lezioni"].append({
-                            **base, "scaglione": _nome_scaglione(lz.get("scaglione_da"), lz.get("scaglione_a")),
-                            "da": lz.get("scaglione_da"), "a": lz.get("scaglione_a"),
-                            "docenti": doc_sc.get((lz.get("scaglione_da"), lz.get("scaglione_a")), ""),
-                            "giorno": lz.get("giorno"), "giorno_n": lz.get("giorno_n"),
-                            "inizio": lz.get("inizio"), "fine": lz.get("fine"), "durata_min": lz.get("durata_min"),
-                            "aula": lz.get("aula"), "edificio": lz.get("aula_descrizione"),
-                            "attivita": lz.get("attivita"), "dal": lz.get("dal"), "al": lz.get("al"),
-                            "n_date": len(date) or None, "date_lezioni": ", ".join(date),
-                            "periodo_orario": lz.get("periodo_orario"), "anno_corso": _num(ins.get("anno_corso")),
-                        })
-                if ins.get("errore"):
-                    nota = f"non letto per un errore: {ins['errore']}"[:500]
-                else:
-                    nota = _nota_chiara(ins.get("nota_dettaglio")) or "; ".join(
-                        dict.fromkeys(_nota_chiara(s["orario_nota"]) for s in sezioni if s.get("orario_nota")))
-                out["insegnamenti"].append({
-                    **base, "tipo": ins.get("tipo"), "ssd": ins.get("ssd"), "lingua": _lingue(ins.get("lingua")),
-                    "sede_erogazione": ins.get("sede_erogazione"), "blocco": ins.get("blocco"),
-                    "anno_corso": _num(ins.get("anno_corso")), "n_scaglioni": ins.get("n_scaglioni"),
-                    "scaglioni": "; ".join(nomi_sc), "docenti": ", ".join(tutti_doc),
-                    "n_lezioni": len(tutte_lez), "nota": nota,
-                })
-        for ps in corso.get("piani_scartati", []):
-            ctx = _ctx(dati, corso, {"codice": ps.get("codice"), "nome": ps.get("nome"),
-                                     "sede": ps.get("sede"), "anno_corso": ps.get("anno_corso")})
-            out["piani"].append({**ctx, "stato": "scartato (altra sede)"})
-        if not corso.get("piani") and not corso.get("piani_scartati"):
-            ctx = _ctx(dati, corso, None)
-            stato = (f"non letto per un errore: {corso['errore']}" if corso.get("errore")
-                     else "; ".join(corso.get("note", [])) or corso.get("nota") or "nessun piano")
-            out["piani"].append({**ctx, "stato": stato})
-    for (_, _, anno), nome, sel in gruppi_cognomi(out["lezioni"]):
-        out["cognomi"].append({
+def _riga_piano(ctx, piano):
+    """Tabella «Corsi e piani»: un piano scaricato."""
+    return {**ctx, "piano_lingua": piano.get("lingua"), "stato": "incluso",
+            "n_insegnamenti_totali": piano.get("n_insegnamenti_totali"),
+            "n_insegnamenti": len(piano.get("insegnamenti", []))}
+
+
+def _righe_piani_non_scaricati(dati, corso):
+    """Tabella «Corsi e piani»: piani scartati (altra sede) e corsi senza nessun piano, con il motivo."""
+    righe = []
+    for ps in corso.get("piani_scartati", []):
+        ctx = _ctx(dati, corso, {"codice": ps.get("codice"), "nome": ps.get("nome"),
+                                 "sede": ps.get("sede"), "anno_corso": ps.get("anno_corso")})
+        righe.append({**ctx, "stato": "scartato (altra sede)"})
+    if not corso.get("piani") and not corso.get("piani_scartati"):
+        stato = (f"non letto per un errore: {corso['errore']}" if corso.get("errore")
+                 else "; ".join(corso.get("note", [])) or corso.get("nota") or "nessun piano")
+        righe.append({**_ctx(dati, corso, None), "stato": stato})
+    return righe
+
+
+def _righe_scaglioni(base, ins, sez):
+    """Tabella «Scaglioni»: uno scaglione per riga, con le sue lezioni divise per giorno."""
+    righe = []
+    for sc in sez.get("scaglioni", []):
+        # le lezioni di questo scaglione: nell'orario ogni lezione indica lo scaglione (da, a) a cui appartiene
+        lez_sc = [{**lz, "insegnamento": ins.get("nome")} for lz in sez.get("orario") or []
+                  if (lz.get("scaglione_da"), lz.get("scaglione_a")) == (sc.get("da"), sc.get("a"))]
+        moduli = [r.get("modulo") for r in sc.get("righe", []) if r.get("modulo")]
+        righe.append({
+            **base, "sezione": sez.get("id_sezione"), "scaglione": _nome_scaglione(sc.get("da"), sc.get("a")),
+            "da": sc.get("da"), "a": sc.get("a"), "docenti": _lista(sc.get("docenti")),
+            "moduli": "; ".join(dict.fromkeys(moduli)), "n_lezioni": len(lez_sc),
+            "ore_settimanali": _ore(lez_sc),
+            "orario": _sintesi_orario(lez_sc) or _nota_chiara(sez.get("orario_nota")),
+            "aule": _aule(lez_sc),
+            "periodo_lezioni": _periodo_lezioni(lez_sc), **_giorni_scaglione(lez_sc),
+        })
+    return righe
+
+
+def _righe_lezioni(base, ins, sez):
+    """Tabella «Lezioni»: una lezione settimanale per riga, con i docenti del suo scaglione."""
+    docenti = {(sc.get("da"), sc.get("a")): _lista(sc.get("docenti")) for sc in sez.get("scaglioni", [])}
+    righe = []
+    for lz in sez.get("orario") or []:
+        date = lz.get("date_lezioni") or []
+        righe.append({
+            **base, "scaglione": _nome_scaglione(lz.get("scaglione_da"), lz.get("scaglione_a")),
+            "da": lz.get("scaglione_da"), "a": lz.get("scaglione_a"),
+            "docenti": docenti.get((lz.get("scaglione_da"), lz.get("scaglione_a")), ""),
+            "giorno": lz.get("giorno"), "giorno_n": lz.get("giorno_n"),
+            "inizio": lz.get("inizio"), "fine": lz.get("fine"), "durata_min": lz.get("durata_min"),
+            "aula": lz.get("aula"), "edificio": lz.get("aula_descrizione"),
+            "attivita": lz.get("attivita"), "dal": lz.get("dal"), "al": lz.get("al"),
+            "n_date": len(date) or None, "date_lezioni": ", ".join(date),
+            "periodo_orario": lz.get("periodo_orario"), "anno_corso": _num(ins.get("anno_corso")),
+        })
+    return righe
+
+
+def _riga_insegnamento(base, ins):
+    """Tabella «Insegnamenti»: un insegnamento, con l'elenco dei suoi scaglioni e docenti."""
+    sezioni = ins.get("sezioni") or []
+    scaglioni = [sc for sez in sezioni for sc in sez.get("scaglioni", [])]
+    docenti = []
+    for sc in scaglioni:
+        docenti += [d for d in sc.get("docenti", []) if d not in docenti]
+    if ins.get("errore"):
+        nota = f"non letto per un errore: {ins['errore']}"[:500]
+    else:
+        nota = _nota_chiara(ins.get("nota_dettaglio")) or "; ".join(
+            dict.fromkeys(_nota_chiara(s["orario_nota"]) for s in sezioni if s.get("orario_nota")))
+    return {
+        **base, "tipo": ins.get("tipo"), "ssd": ins.get("ssd"), "lingua": _lingue(ins.get("lingua")),
+        "sede_erogazione": ins.get("sede_erogazione"), "blocco": ins.get("blocco"),
+        "anno_corso": _num(ins.get("anno_corso")), "n_scaglioni": ins.get("n_scaglioni"),
+        "scaglioni": "; ".join(_nome_scaglione(sc.get("da"), sc.get("a")) for sc in scaglioni),
+        "docenti": ", ".join(docenti),
+        "n_lezioni": sum(len(s.get("orario") or []) for s in sezioni), "nota": nota,
+    }
+
+
+def _righe_cognomi(lezioni):
+    """Tabella «Orario per cognome»: una fascia di cognomi per riga (vedi gruppi_cognomi)."""
+    righe = []
+    for (_, _, anno), nome, sel in gruppi_cognomi(lezioni):
+        righe.append({
             **{c: sel[0].get(c) for c in CONTESTO}, "anno_corso": anno, "scaglione": nome,
             **_giorni_scaglione(sel, con_nome=True), "aule": _aule(sel), "periodo_lezioni": _periodo_lezioni(sel),
             "insegnamenti_scaglioni": "\n".join(dict.fromkeys(f"{lz.get('insegnamento')}: {lz.get('scaglione')}"
                                                               for lz in sorted(sel, key=lambda x: x.get("insegnamento") or ""))),
             "ore_settimanali": _ore(sel), "n_lezioni": len(sel),
         })
+    return righe
+
+
+def tabelle(dati):
+    """Dal JSON dello scraper alle tabelle: {nome_tabella: lista di righe (dict)}.
+
+    Nel JSON i dati sono annidati: corso > piano > insegnamento > sezione > scaglioni e orario.
+    Le tabelle li «appiattiscono»: ogni riga ripete il suo contesto (corso, piano, anno…),
+    così ogni riga si capisce da sola e si può filtrare e ordinare per qualunque colonna.
+    La tabella «Orario per cognome» si ricava alla fine dalle lezioni di tutte le altre."""
+    out = {k: [] for k in COLONNE}
+    for corso in dati.get("corsi_di_studio", []):
+        for piano in corso.get("piani", []):
+            ctx = _ctx(dati, corso, piano)
+            out["piani"].append(_riga_piano(ctx, piano))
+            for ins in piano.get("insegnamenti", []):
+                base = {**ctx, "codice": ins.get("codice"), "insegnamento": ins.get("nome"),
+                        "periodo": ins.get("periodo"), "cfu": _num(ins.get("cfu")), "url": ins.get("url_dettaglio")}
+                for sez in ins.get("sezioni") or []:
+                    out["scaglioni"] += _righe_scaglioni(base, ins, sez)
+                    out["lezioni"] += _righe_lezioni(base, ins, sez)
+                out["insegnamenti"].append(_riga_insegnamento(base, ins))
+        out["piani"] += _righe_piani_non_scaricati(dati, corso)
+    out["cognomi"] = _righe_cognomi(out["lezioni"])
     return out
 
 
@@ -375,7 +435,11 @@ def filtra(righe, filtri=None, cerca=""):
 
 def unisci_duplicati(righe, colonne):
     """Unisce le righe identiche a parte il piano di studi (lo stesso insegnamento
-    compare in più piani): i campi del piano diventano elenchi separati da ' | '."""
+    compare in più piani): i campi del piano diventano elenchi separati da ' | '.
+
+    Due righe sono «la stessa» se coincidono in tutte le colonne tranne quelle in
+    VARIABILI_PER_PIANO (corso, piano, link…). Esempio: Analisi 1, scaglione A–BRU, in 4 corsi
+    diversi -> 1 riga, con Corso = "Ing. Informatica | Ing. Elettronica | …"."""
     chiave_cols = [c for c in colonne if c not in VARIABILI_PER_PIANO]
     gruppi = {}
     for r in righe:
