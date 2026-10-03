@@ -595,7 +595,7 @@ def esporta_json(path, colonne, righe):
                                      ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-CARATTERI_PER_LARGHEZZA = 1.1
+CARATTERI_PER_LARGHEZZA = 1.0
 
 
 def esporta_xlsx(path, fogli):
