@@ -95,6 +95,7 @@ Se manca una scelta, il programma lo segnala prima di partire. Nulla viene scelt
      e le colonne Corso e Piano elencano tutti i corsi separati da `|`. Per esempio, nella tabella Scaglioni
      Analisi Matematica 1 passa da 32 righe (8 scaglioni × 4 corsi) a 8. Vale anche per i file esportati.
    - **Solo lezioni dal** (data `gg/mm/aaaa`) toglie le lezioni già concluse prima di quel giorno, per esempio le aule usate solo nelle prime settimane. Vale per tutte le tabelle, i file salvati e il calendario.
+   - **Unisci le lezioni consecutive**: due lezioni attaccate dello stesso insegnamento, nella stessa aula e negli stessi giorni (es. `14:15–16:15` e `16:15–18:15`) diventano una sola (`14:15–18:15`). Il sito a volte registra così un'unica lezione lunga.
    - Con **Colonne…** scegli quali colonne tenere.
    - Con un doppio clic su una riga la vedi per intero.
 4. **Salva** le righe filtrate:
@@ -126,7 +127,7 @@ python scarica_manifesti.py --corsi 531 --piani primo --no-orari --paralleli 2
 python esporta.py output/FILE.json --tabella scaglioni --formato xlsx --filtro corso_codice=531
 python esporta.py output/FILE.json --calendario scaglione --filtro piano_codice=IT1
 python esporta.py output/FILE.json --calendario cognome --filtro corso_codice=531
-python esporta.py output/FILE.json --tabella cognomi --lezioni-dal 05/10/2026 --unisci-duplicati
+python esporta.py output/FILE.json --tabella cognomi --lezioni-dal 05/10/2026 --unisci-consecutive --unisci-duplicati
 python esporta.py output/FILE.json --tutte --formato xlsx
 ```
 Ogni script mostra le opzioni disponibili con `--help`.

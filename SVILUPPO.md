@@ -132,7 +132,7 @@ piano, anno), così si capisce da sola e si può filtrare per qualunque colonna.
 | `cognomi` | `_righe_cognomi()` → `gruppi_cognomi()` | fascia di cognomi di un piano |
 | `piani` | `_riga_piano()`, `_righe_piani_non_scaricati()` | piano (anche scartati o con errore) |
 
-`tabelle(dati, lezioni_dal)` con una data toglie prima le lezioni già concluse (`_senza_lezioni_concluse()`): è l'opzione *Solo lezioni dal* della scheda 2 e `--lezioni-dal` da terminale.
+`tabelle(dati, lezioni_dal)` con una data toglie prima le lezioni già concluse (`_senza_lezioni_concluse()`): è l'opzione *Solo lezioni dal* della scheda 2 e `--lezioni-dal` da terminale. Con `unisci_consecutive=True` (*Unisci le lezioni consecutive*, `--unisci-consecutive`) `_unisci_consecutive()` unisce i blocchi attaccati della stessa lezione: stessa aula, stesse date (da `lezioni_dal` in poi) e stesso insieme di aule in contemporanea.
 
 Le colonne di ogni tabella, e il loro ordine, sono in `COLONNE`; i nomi mostrati all'utente in `LABELS`;
 le descrizioni in `DESCRIZIONI`.

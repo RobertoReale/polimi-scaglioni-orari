@@ -958,7 +958,14 @@ class SchedaEsplora(ttk.Frame):
         aiuto("Toglie le lezioni già concluse prima di questa data, per esempio quelle delle prime settimane "
               "quando poi l'aula è cambiata. Scrivi la data come 05/10/2026; lascia vuoto per tenere tutte "
               "le lezioni. Vale per tutte le tabelle, per i file salvati e per il calendario.", lbl, e)
-        self.var_dal.trace_add("write", lambda *a: self._data_cambiata())
+        self.var_dal.trace_add("write", lambda *a: self._ricalcola_tabelle())
+        self.var_consecutive = tk.BooleanVar()
+        cb = ttk.Checkbutton(fd, text="Unisci le lezioni consecutive", variable=self.var_consecutive,
+                             command=self._ricalcola_tabelle)
+        cb.grid(row=0, column=3, padx=(16, 0))
+        aiuto("Due lezioni attaccate una all'altra dello stesso insegnamento, nella stessa aula e negli stessi "
+              "giorni (es. 14:15–16:15 e 16:15–18:15) diventano una sola (14:15–18:15): il sito a volte registra "
+              "così un'unica lezione lunga. Vale per tutte le tabelle, per i file salvati e per il calendario.", cb)
 
         s3 = Sezione(self, "③ Anteprima (clic su un'intestazione per ordinare)")
         s3.grid(row=3, column=0, sticky="nsew")
@@ -1037,7 +1044,7 @@ class SchedaEsplora(ttk.Frame):
             return
         try:
             self.dati = ex.carica(p)
-            self.tab = ex.tabelle(self.dati, self._lezioni_dal())
+            self.tab = self._tabelle()
         except Exception as e:
             self.dati, self.tab, self.righe = None, {}, []
             self.tree.delete(*self.tree.get_children())
@@ -1064,12 +1071,17 @@ class SchedaEsplora(ttk.Frame):
                             else "gg/mm/aaaa, vuoto = tutte", foreground=GRIGIO)
         return dal
 
-    def _data_cambiata(self):
-        dal = self._lezioni_dal()
-        if self.dati is not None:
-            self.tab = ex.tabelle(self.dati, dal)
-            self._aggiorna_valori_filtri()
-            self._rinvia_aggiornamento()
+    def _tabelle(self):
+        return ex.tabelle(self.dati, self._lezioni_dal(), self.var_consecutive.get())
+
+    def _ricalcola_tabelle(self):
+        """«Solo lezioni dal» o «Unisci le lezioni consecutive» cambiati: le tabelle vanno ricostruite."""
+        if self.dati is None:
+            self._lezioni_dal()  # aggiorna comunque l'etichetta della data
+            return
+        self.tab = self._tabelle()
+        self._aggiorna_valori_filtri()
+        self._rinvia_aggiornamento()
 
     def _tabella_cambiata(self):
         t = self.var_tab.get()

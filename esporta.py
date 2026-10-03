@@ -25,7 +25,7 @@ Uso da terminale, esempi:
     python esporta.py output/manifesti.json --tabella lezioni --filtro corso_codice=531 --cerca analisi
     python esporta.py output/manifesti.json --calendario scaglione --filtro piano_codice=IT1
     python esporta.py output/manifesti.json --calendario cognome --filtro corso_codice=531
-    python esporta.py output/manifesti.json --tabella cognomi --lezioni-dal 05/10/2026 --unisci-duplicati
+    python esporta.py output/manifesti.json --tabella cognomi --lezioni-dal 05/10/2026 --unisci-consecutive --unisci-duplicati
     python esporta.py output/manifesti.json --tutte --formato xlsx      (un foglio per tabella)
 """
 import argparse
@@ -451,14 +451,55 @@ def _senza_lezioni_concluse(ins, dal):
     return {**ins, "sezioni": sezioni}
 
 
-def tabelle(dati, lezioni_dal=None):
+def _unisci_consecutive(orario, dal=None):
+    """Unisce le lezioni attaccate una all'altra (es. 14:15–16:15 e 16:15–18:15 → 14:15–18:15): stesso
+    scaglione, giorno, aula e attività, e le stesse date (da `dal` in poi, se indicato). Il sito a volte
+    registra così un'unica lezione lunga. Restano separate se le date sono diverse (in quei giorni non sono
+    davvero un'unica lezione) o se i due blocchi usano insiemi di aule diversi (es. 14:15–16:15 in A e B,
+    16:15–18:15 in B e C: unire solo B darebbe tre righe sfasate invece di due)."""
+    def date(lz):
+        d = [x for x in lz.get("date_lezioni") or [] if not (dal and _data(x) and _data(x) < dal)]
+        return tuple(d) if d else (lz.get("dal"), lz.get("al"))
+
+    def gruppo(lz):
+        return tuple(lz.get(k) for k in ("scaglione_da", "scaglione_a", "giorno", "attivita")) + (date(lz),)
+
+    def aule(lz):  # le aule usate in contemporanea dallo stesso blocco
+        return {x.get("aula") for x in out
+                if gruppo(x) == gruppo(lz) and (x.get("inizio"), x.get("fine")) == (lz.get("inizio"), lz.get("fine"))}
+
+    out = list(orario)
+    unite = True
+    while unite:  # più di due blocchi di fila si uniscono un passo alla volta
+        unite = False
+        for i, a in enumerate(out):
+            j = next((j for j, b in enumerate(out) if j != i and gruppo(b) == gruppo(a) and b.get("aula") == a.get("aula")
+                      and b.get("inizio") and b.get("inizio") == a.get("fine") and aule(b) == aule(a)), None)
+            if j is None:
+                continue
+            b = out[j]
+            # le date in cui ci sono entrambi i blocchi (le altre sono prima di `dal`)
+            comuni = [x for x in a.get("date_lezioni") or [] if x in set(b.get("date_lezioni") or [])]
+            giorni = sorted(_data(x) for x in comuni if _data(x))
+            out[i] = {**a, "fine": b.get("fine"), "durata_min": (a.get("durata_min") or 0) + (b.get("durata_min") or 0),
+                      "date_lezioni": comuni or a.get("date_lezioni"),
+                      "dal": f"{giorni[0]:%d/%m/%Y}" if giorni else a.get("dal"),
+                      "al": f"{giorni[-1]:%d/%m/%Y}" if giorni else b.get("al")}
+            del out[j]
+            unite = True
+            break
+    return out
+
+
+def tabelle(dati, lezioni_dal=None, unisci_consecutive=False):
     """Dal JSON dello scraper alle tabelle: {nome_tabella: lista di righe (dict)}.
 
     Nel JSON i dati sono annidati: corso > piano > insegnamento > sezione > scaglioni e orario.
     Le tabelle li «appiattiscono»: ogni riga ripete il suo contesto (corso, piano, anno…),
     così ogni riga si capisce da sola e si può filtrare e ordinare per qualunque colonna.
     La tabella «Orario per cognome» si ricava alla fine dalle lezioni di tutte le altre.
-    lezioni_dal (datetime): tiene solo le lezioni che hanno ancora date da quel giorno in poi."""
+    lezioni_dal (datetime): tiene solo le lezioni che hanno ancora date da quel giorno in poi.
+    unisci_consecutive: le lezioni attaccate una all'altra diventano una sola (vedi _unisci_consecutive)."""
     out = {k: [] for k in COLONNE}
     for corso in dati.get("corsi_di_studio", []):
         for piano in corso.get("piani", []):
@@ -467,6 +508,9 @@ def tabelle(dati, lezioni_dal=None):
             for ins in piano.get("insegnamenti", []):
                 if lezioni_dal:
                     ins = _senza_lezioni_concluse(ins, lezioni_dal)
+                if unisci_consecutive:
+                    ins = {**ins, "sezioni": [{**s, "orario": _unisci_consecutive(s.get("orario") or [], lezioni_dal)}
+                                              for s in ins.get("sezioni") or []]}
                 base = {**ctx, "codice": ins.get("codice"), "insegnamento": ins.get("nome"),
                         "periodo": ins.get("periodo"), "cfu": _num(ins.get("cfu")), "url": ins.get("url_dettaglio")}
                 for sez in ins.get("sezioni") or []:
@@ -847,6 +891,9 @@ def main():
                     help="una sola riga per insegnamento, scaglione o lezione anche se compare in più corsi e piani")
     ap.add_argument("--lezioni-dal", metavar="GG/MM/AAAA",
                     help="tieni solo le lezioni che hanno ancora date da quel giorno in poi (es. la data di oggi)")
+    ap.add_argument("--unisci-consecutive", action="store_true",
+                    help="lezioni attaccate una all'altra, stesso insegnamento, aula e date (es. 14:15–16:15 e "
+                         "16:15–18:15), diventano una sola (14:15–18:15)")
     ap.add_argument("--calendario", choices=list(RAGGRUPPA), help="crea l'orario settimanale HTML raggruppato così")
     ap.add_argument("--out", help="file di destinazione (default: in output/esportazioni/)")
     ap.add_argument("--elenca-valori", metavar="COLONNA", help="mostra i valori presenti in una colonna ed esce")
@@ -859,7 +906,7 @@ def main():
         dal = leggi_data(a.lezioni_dal)
     except ValueError:
         sys.exit(f"--lezioni-dal: «{a.lezioni_dal}» non è una data nel formato GG/MM/AAAA")
-    tab = tabelle(dati, dal)
+    tab = tabelle(dati, dal, a.unisci_consecutive)
     filtri = {}
     for f in a.filtro:
         k, _, v = f.partition("=")
