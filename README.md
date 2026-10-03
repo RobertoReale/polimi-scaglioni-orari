@@ -40,7 +40,7 @@ in una cartella locale `.venv`. Serve la connessione a internet.
 | Corso di studi | per esempio *Ingegneria Informatica*; ogni corso ha un codice numerico (es. `531`) |
 | Tipo di laurea | Laurea di primo livello, Laurea Magistrale, Ciclo Unico… *ord. 96/23* indica il regolamento (ordinamento) del corso |
 | Piano di studi | una variante dello stesso corso (es. in italiano o in inglese, o in un'altra sede), con il suo elenco di insegnamenti. Il piano `***` raccoglie gli insegnamenti comuni a tutti i piani |
-| Periodo didattico | 1° semestre, 2° semestre o annuale |
+| Periodo didattico | 1° semestre, 2° semestre o annuale. Alcuni corsi (es. Industrial Engineering a Piacenza) sono divisi in trimestri: rientrano in *Altri periodi* |
 | Scaglione | gruppo di studenti di un insegnamento, diviso per iniziale del cognome, con i suoi docenti, orari e aule. `BRU – CON` vuol dire da BRU (compreso) a CON (escluso); `A – ZZZZ (unico)` vuol dire un solo gruppo per tutti |
 | Fascia di cognomi | gli insegnamenti dividono i cognomi in modi diversi: la fascia è un intervallo in cui la divisione è la stessa per tutti, e serve a comporre l'orario completo di uno studente |
 
@@ -74,7 +74,7 @@ Se manca una scelta, il programma lo segnala prima di partire. Nulla viene scelt
    |---|---|
    | Insegnamenti | ogni insegnamento di ogni piano: periodo, CFU, n. scaglioni, docenti |
    | Scaglioni | ogni scaglione con il suo orario settimanale: una colonna per giorno (Lunedì…Sabato, es. `15:15–18:15 aula 7.1.3`), le aule con l'edificio, il periodo delle lezioni, docenti, moduli |
-   | Orario per cognome | ogni fascia di cognomi di un piano: l'orario settimanale completo, con **tutti** gli insegnamenti, di chi ha il cognome in quella fascia (es. `BRU – CON`: Analisi, Informatica e Geometria insieme) |
+   | Orario per cognome | ogni fascia di cognomi di un piano: l'orario settimanale completo, con **tutti** gli insegnamenti, di chi ha il cognome in quella fascia (es. `BRU – CON`: Analisi, Informatica e Geometria insieme). Ogni lezione: orario, insegnamento, aula e docenti (es. `08:15–10:15 ANALISI 1 · aula 3.0.1 · prof. Rossi Mario`) |
    | Lezioni (orario) | ogni lezione settimanale: giorno, ora di inizio e fine, aula ed edificio, date |
    | Corsi e piani | ogni piano di studio, compresi quelli scartati perché di un'altra sede |
 
@@ -94,6 +94,7 @@ Se manca una scelta, il programma lo segnala prima di partire. Nulla viene scelt
      insegnamento (o scaglione, o lezione) può comparire in più corsi e piani di studio. Resta una riga sola,
      e le colonne Corso e Piano elencano tutti i corsi separati da `|`. Per esempio, nella tabella Scaglioni
      Analisi Matematica 1 passa da 32 righe (8 scaglioni × 4 corsi) a 8. Vale anche per i file esportati.
+   - **Solo lezioni dal** (data `gg/mm/aaaa`) toglie le lezioni già concluse prima di quel giorno, per esempio le aule usate solo nelle prime settimane. Vale per tutte le tabelle, i file salvati e il calendario.
    - Con **Colonne…** scegli quali colonne tenere.
    - Con un doppio clic su una riga la vedi per intero.
 4. **Salva** le righe filtrate:
@@ -125,6 +126,7 @@ python scarica_manifesti.py --corsi 531 --piani primo --no-orari --paralleli 2
 python esporta.py output/FILE.json --tabella scaglioni --formato xlsx --filtro corso_codice=531
 python esporta.py output/FILE.json --calendario scaglione --filtro piano_codice=IT1
 python esporta.py output/FILE.json --calendario cognome --filtro corso_codice=531
+python esporta.py output/FILE.json --tabella cognomi --lezioni-dal 05/10/2026 --unisci-duplicati
 python esporta.py output/FILE.json --tutte --formato xlsx
 ```
 Ogni script mostra le opzioni disponibili con `--help`.

@@ -66,7 +66,8 @@ GUIDA = [
      "• Piano di studi: una variante dello stesso corso (per esempio in italiano o in inglese, o in "
      "un'altra sede). Ogni piano ha il suo elenco di insegnamenti. Il piano «***» raccoglie gli "
      "insegnamenti comuni a tutti i piani.\n"
-     "• Periodo didattico: 1° semestre, 2° semestre o annuale.\n"
+     "• Periodo didattico: 1° semestre, 2° semestre o annuale. Alcuni corsi sono divisi in trimestri: "
+     "rientrano in «Altri periodi».\n"
      "• Scaglione: quando un insegnamento ha molti studenti, li divide per iniziale del cognome; ogni "
      "gruppo ha i suoi docenti, orari e aule. «BRU – CON» vuol dire: cognomi da BRU (compreso) fino a "
      "CON (escluso). «A – ZZZZ (unico)» vuol dire che c'è un solo gruppo per tutti.\n"
@@ -338,7 +339,8 @@ class SchedaScarica(ttk.Frame):
         spiegazioni = {"annuale": "Insegnamenti che durano tutto l'anno (entrambi i semestri).",
                        "1sem": "Insegnamenti del primo semestre (circa settembre–gennaio).",
                        "2sem": "Insegnamenti del secondo semestre (circa febbraio–luglio).",
-                       "altro": "Periodi diversi dai precedenti, se il sito ne indica (es. corsi brevi)."}
+                       "altro": "Periodi diversi dai precedenti, se il sito ne indica: per esempio i trimestri "
+                                "di alcuni corsi (come Industrial Engineering a Piacenza) o i corsi brevi."}
         for i, (k, t) in enumerate(ps.PERIODI.items()):
             v = tk.BooleanVar()
             casella(f, t, v, spiegazioni[k], row=0, column=i, padx=(0, 8))
@@ -944,6 +946,19 @@ class SchedaEsplora(ttk.Frame):
         b = ttk.Button(f, text="Azzera filtri", command=self._azzera_filtri)
         b.grid(row=0, column=4, padx=(6, 0))
         aiuto("Rimette tutti i filtri su «(tutti)» e svuota la ricerca.", b)
+        fd = ttk.Frame(f)
+        fd.grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 0))
+        lbl = ttk.Label(fd, text="Solo lezioni dal")
+        lbl.grid(row=0, column=0)
+        self.var_dal = tk.StringVar()
+        e = ttk.Entry(fd, textvariable=self.var_dal, width=12)
+        e.grid(row=0, column=1, padx=6)
+        self.lbl_dal = ttk.Label(fd, text="gg/mm/aaaa, vuoto = tutte", foreground=GRIGIO)
+        self.lbl_dal.grid(row=0, column=2)
+        aiuto("Toglie le lezioni già concluse prima di questa data, per esempio quelle delle prime settimane "
+              "quando poi l'aula è cambiata. Scrivi la data come 05/10/2026; lascia vuoto per tenere tutte "
+              "le lezioni. Vale per tutte le tabelle, per i file salvati e per il calendario.", lbl, e)
+        self.var_dal.trace_add("write", lambda *a: self._data_cambiata())
 
         s3 = Sezione(self, "③ Anteprima (clic su un'intestazione per ordinare)")
         s3.grid(row=3, column=0, sticky="nsew")
@@ -1022,7 +1037,7 @@ class SchedaEsplora(ttk.Frame):
             return
         try:
             self.dati = ex.carica(p)
-            self.tab = ex.tabelle(self.dati)
+            self.tab = ex.tabelle(self.dati, self._lezioni_dal())
         except Exception as e:
             self.dati, self.tab, self.righe = None, {}, []
             self.tree.delete(*self.tree.get_children())
@@ -1038,6 +1053,24 @@ class SchedaEsplora(ttk.Frame):
         self._tabella_cambiata()
 
     # ---------------------------------------------------------------- filtri
+    def _lezioni_dal(self):
+        """La data di «Solo lezioni dal», o None se vuota o non valida (lo dice l'etichetta accanto)."""
+        try:
+            dal = ex.leggi_data(self.var_dal.get())
+        except ValueError:
+            self.lbl_dal.config(text="data non valida: scrivila come 05/10/2026", foreground=ROSSO)
+            return None
+        self.lbl_dal.config(text=f"lezioni concluse prima del {dal:%d/%m/%Y} escluse" if dal
+                            else "gg/mm/aaaa, vuoto = tutte", foreground=GRIGIO)
+        return dal
+
+    def _data_cambiata(self):
+        dal = self._lezioni_dal()
+        if self.dati is not None:
+            self.tab = ex.tabelle(self.dati, dal)
+            self._aggiorna_valori_filtri()
+            self._rinvia_aggiornamento()
+
     def _tabella_cambiata(self):
         t = self.var_tab.get()
         self.lbl_desc.config(text=ex.DESCRIZIONI.get(t, ""))

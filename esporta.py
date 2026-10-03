@@ -25,6 +25,7 @@ Uso da terminale, esempi:
     python esporta.py output/manifesti.json --tabella lezioni --filtro corso_codice=531 --cerca analisi
     python esporta.py output/manifesti.json --calendario scaglione --filtro piano_codice=IT1
     python esporta.py output/manifesti.json --calendario cognome --filtro corso_codice=531
+    python esporta.py output/manifesti.json --tabella cognomi --lezioni-dal 05/10/2026 --unisci-duplicati
     python esporta.py output/manifesti.json --tutte --formato xlsx      (un foglio per tabella)
 """
 import argparse
@@ -35,6 +36,7 @@ import html
 import json
 import re
 import sys
+import textwrap
 from datetime import datetime
 from pathlib import Path
 
@@ -88,7 +90,7 @@ COLONNE = {
 DESCRIZIONI = {
     "insegnamenti": "Una riga per insegnamento di ogni piano: periodo, CFU, n. scaglioni, docenti",
     "scaglioni": "Una riga per scaglione: lettere da/a, docenti e il suo orario settimanale (una colonna per giorno, con le aule)",
-    "cognomi": "Una riga per fascia di cognomi: orario completo con tutti gli insegnamenti del piano",
+    "cognomi": "Una riga per fascia di cognomi: orario completo con tutti gli insegnamenti del piano, aule e docenti",
     "lezioni": "Una riga per lezione settimanale: giorno, ora, aula, date",
     "piani": "Una riga per corso e piano di studi (anche quelli scartati perché di altre sedi)",
 }
@@ -115,6 +117,11 @@ def carica(path):
 
 def _lista(v):
     return ", ".join(v) if isinstance(v, list) else (v or "")
+
+
+def _docenti(v):
+    """Docenti di uno scaglione, senza i segnaposto del sito ('Docente Non Definito Non Definito')."""
+    return [d for d in (v or []) if "non definito" not in d.lower()]
 
 
 def _num(v):
@@ -206,29 +213,72 @@ def _ore(lezioni):
     return _num(round(sum(lz.get("durata_min") or 0 for lz in lezioni) / 60, 2))
 
 
+def _sezione(lz):
+    """'ANALISI 1  [sez. B]' -> 'B' (sezioni parallele dello stesso insegnamento)."""
+    m = re.search(r"\[sez\.\s*(.*?)\]\s*$", lz.get("attivita") or "")
+    return m.group(1).strip() if m else ""
+
+
+def _attivita(lz):
+    """Cosa aggiunge l'attività al nome dell'insegnamento: il modulo o la squadra, senza ripetere il nome.
+    'METODI DI RAPPRESENTAZIONE TECNICA Squadra1' -> 'Squadra1'; uguale all'insegnamento -> ''."""
+    attivita = re.sub(r"\s*\[sez\..*?\]\s*$", "", lz.get("attivita") or "").strip()
+    nome = (lz.get("insegnamento") or "").strip()
+    if nome and attivita.upper().startswith(nome.upper()):
+        attivita = attivita[len(nome):].strip(" -–:")
+    return attivita
+
+
+def _nome_aula(aula):
+    """'B2.2.13' -> 'aula B2.2.13'; i nomi che si spiegano da soli restano come sono ('AULA D', 'PADIGLIONE …')."""
+    primo = aula.split()[0].upper() if aula.split() else ""
+    return aula if primo in ("AULA", "AULE", "PADIGLIONE", "LABORATORIO", "LAB", "SALA") else f"aula {aula}"
+
+
 def _giorni_scaglione(lezioni, con_nome=False):
     """{'lun': '08:15–10:15 aula 2.1.4', ...}: l'orario dello scaglione, una colonna per giorno.
-    con_nome: davanti all'aula anche l'insegnamento (orario di più insegnamenti insieme)."""
+    con_nome: orario di più insegnamenti insieme, quindi accanto a ogni lezione anche l'insegnamento
+    e i docenti; la sezione compare se nelle lezioni ci sono più sezioni parallele dello stesso insegnamento.
+    La stessa lezione tenuta in più aule contemporaneamente diventa una riga sola."""
     periodi = [(_data(lz.get("dal")), _data(lz.get("al"))) for lz in lezioni]
     periodi = [p for p in periodi if p[0] and p[1]]
     # corsi annuali: orari diversi nei due semestri -> accanto a ogni lezione le sue date
     con_date = any(a[1] < b[0] or b[1] < a[0] for a in periodi for b in periodi)
-    out = {}
-    for lz in sorted(lezioni, key=lambda x: (x.get("giorno_n") or 9, _data(x.get("dal")) or datetime.min,
-                                             x.get("inizio") or "")):
+    sezioni = {}
+    for lz in lezioni:
+        sezioni.setdefault(lz.get("insegnamento"), set()).add(_sezione(lz))
+    def ordine(lz):
+        # per ora di inizio; nei corsi annuali prima le lezioni del 1° semestre (da agosto), poi quelle del 2°
+        dal = _data(lz.get("dal"))
+        return (lz.get("giorno_n") or 9, bool(dal and dal.month < 8), lz.get("inizio") or "", dal or datetime.min)
+
+    righe = {}  # (colonna, testo senza aula, docenti, date) -> aule, nell'ordine delle lezioni
+    for lz in sorted(lezioni, key=ordine):
         col = GIORNI_COLONNE.get(lz.get("giorno"))
         if not col:
             continue
         testo = f"{lz.get('inizio')}–{lz.get('fine')}"
         if con_nome:
             testo += f" {lz.get('insegnamento')}"
-        attivita = re.sub(r"\s*\[sez\..*?\]\s*$", "", lz.get("attivita") or "").strip()
-        if attivita and attivita != lz.get("insegnamento"):
-            testo += f" ({attivita})"
-        if lz.get("aula"):
-            testo += f" · aula {lz['aula']}" if con_nome else f" aula {lz['aula']}"
-        if con_date and lz.get("dal"):
-            testo += f" [{lz['dal'][:5]}→{(lz.get('al') or '')[:5]}]"
+        extra = [_attivita(lz)]
+        if con_nome and len(sezioni.get(lz.get("insegnamento"), ())) > 1:
+            extra.append(f"sez. {_sezione(lz)}")
+        extra = [x for x in extra if x]
+        if extra:
+            testo += f" ({', '.join(extra)})"
+        date = f" [{lz['dal'][:5]}→{(lz.get('al') or '')[:5]}]" if con_date and lz.get("dal") else ""
+        docenti = lz.get("docenti") if con_nome else ""
+        aule = righe.setdefault((col, testo, docenti, date), [])
+        if lz.get("aula") and lz["aula"] not in aule:
+            aule.append(lz["aula"])
+    out = {}
+    for (col, testo, docenti, date), aule in righe.items():
+        if aule:
+            aule = " + ".join(_nome_aula(a) for a in aule)
+            testo += f" · {aule}" if con_nome else f" {aule}"
+        if docenti:
+            testo += f" · {'proff.' if ',' in docenti else 'prof.'} {docenti}"
+        testo += date
         out[col] = f"{out[col]}\n{testo}" if col in out else testo  # una lezione per riga nella cella
     return out
 
@@ -319,7 +369,7 @@ def _righe_scaglioni(base, ins, sez):
         moduli = [r.get("modulo") for r in sc.get("righe", []) if r.get("modulo")]
         righe.append({
             **base, "sezione": sez.get("id_sezione"), "scaglione": _nome_scaglione(sc.get("da"), sc.get("a")),
-            "da": sc.get("da"), "a": sc.get("a"), "docenti": _lista(sc.get("docenti")),
+            "da": sc.get("da"), "a": sc.get("a"), "docenti": _lista(_docenti(sc.get("docenti"))),
             "moduli": "; ".join(dict.fromkeys(moduli)), "n_lezioni": len(lez_sc),
             "ore_settimanali": _ore(lez_sc),
             "orario": _sintesi_orario(lez_sc) or _nota_chiara(sez.get("orario_nota")),
@@ -331,7 +381,7 @@ def _righe_scaglioni(base, ins, sez):
 
 def _righe_lezioni(base, ins, sez):
     """Tabella «Lezioni»: una lezione settimanale per riga, con i docenti del suo scaglione."""
-    docenti = {(sc.get("da"), sc.get("a")): _lista(sc.get("docenti")) for sc in sez.get("scaglioni", [])}
+    docenti = {(sc.get("da"), sc.get("a")): _lista(_docenti(sc.get("docenti"))) for sc in sez.get("scaglioni", [])}
     righe = []
     for lz in sez.get("orario") or []:
         date = lz.get("date_lezioni") or []
@@ -355,7 +405,7 @@ def _riga_insegnamento(base, ins):
     scaglioni = [sc for sez in sezioni for sc in sez.get("scaglioni", [])]
     docenti = []
     for sc in scaglioni:
-        docenti += [d for d in sc.get("docenti", []) if d not in docenti]
+        docenti += [d for d in _docenti(sc.get("docenti")) if d not in docenti]
     if ins.get("errore"):
         nota = f"non letto per un errore: {ins['errore']}"[:500]
     else:
@@ -385,19 +435,38 @@ def _righe_cognomi(lezioni):
     return righe
 
 
-def tabelle(dati):
+def leggi_data(testo):
+    """'03/10/2026' -> datetime; vuoto -> None; ValueError se non è una data gg/mm/aaaa."""
+    testo = (testo or "").strip()
+    return datetime.strptime(testo, "%d/%m/%Y") if testo else None
+
+
+def _senza_lezioni_concluse(ins, dal):
+    """L'insegnamento senza le lezioni la cui ultima data viene prima di `dal` (es. aule cambiate
+    dopo le prime settimane). Le lezioni senza date restano."""
+    sezioni = []
+    for sez in ins.get("sezioni") or []:
+        orario = [lz for lz in sez.get("orario") or [] if not (_data(lz.get("al")) and _data(lz.get("al")) < dal)]
+        sezioni.append({**sez, "orario": orario})
+    return {**ins, "sezioni": sezioni}
+
+
+def tabelle(dati, lezioni_dal=None):
     """Dal JSON dello scraper alle tabelle: {nome_tabella: lista di righe (dict)}.
 
     Nel JSON i dati sono annidati: corso > piano > insegnamento > sezione > scaglioni e orario.
     Le tabelle li «appiattiscono»: ogni riga ripete il suo contesto (corso, piano, anno…),
     così ogni riga si capisce da sola e si può filtrare e ordinare per qualunque colonna.
-    La tabella «Orario per cognome» si ricava alla fine dalle lezioni di tutte le altre."""
+    La tabella «Orario per cognome» si ricava alla fine dalle lezioni di tutte le altre.
+    lezioni_dal (datetime): tiene solo le lezioni che hanno ancora date da quel giorno in poi."""
     out = {k: [] for k in COLONNE}
     for corso in dati.get("corsi_di_studio", []):
         for piano in corso.get("piani", []):
             ctx = _ctx(dati, corso, piano)
             out["piani"].append(_riga_piano(ctx, piano))
             for ins in piano.get("insegnamenti", []):
+                if lezioni_dal:
+                    ins = _senza_lezioni_concluse(ins, lezioni_dal)
                 base = {**ctx, "codice": ins.get("codice"), "insegnamento": ins.get("nome"),
                         "periodo": ins.get("periodo"), "cfu": _num(ins.get("cfu")), "url": ins.get("url_dettaglio")}
                 for sez in ins.get("sezioni") or []:
@@ -482,6 +551,9 @@ def esporta_json(path, colonne, righe):
                                      ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+CARATTERI_PER_LARGHEZZA = 1.1
+
+
 def esporta_xlsx(path, fogli):
     """fogli: {nome_foglio: (colonne, righe)}"""
     from openpyxl import Workbook
@@ -515,9 +587,23 @@ def esporta_xlsx(path, fogli):
                         cell.hyperlink = cell.value
                         cell.value = "apri"
                         cell.font = Font(color="0563C1", underline="single")
+        larghezze = []
         for i, c in enumerate(colonne, 1):
-            lung = max([len(label(c))] + [len(str(r.get(c) or "")) for r in righe[:500]])
-            ws.column_dimensions[get_column_letter(i)].width = min(max(lung + 2, 8), 60)
+            # la riga più lunga del testo (le celle con più lezioni vanno a capo)
+            lung = max([len(label(c))] + [len(x) for r in righe[:500] for x in str(r.get(c) or "").split("\n")])
+            larghezze.append(min(max(lung + 2, 8), 60))
+            ws.column_dimensions[get_column_letter(i)].width = larghezze[-1]
+        # altezza delle righe con testo su più righe: non tutti i programmi la calcolano da soli.
+        # Si simula l'a capo per parole; in una colonna larga w ci stanno circa CARATTERI_PER_LARGHEZZA·w
+        # caratteri (il carattere è proporzionale: valore misurato confrontando con l'adattamento di Excel)
+        for n, r in enumerate(righe, 2):
+            linee = max([sum(len(textwrap.wrap(x, int(w * CARATTERI_PER_LARGHEZZA))) or 1
+                             for x in str(r.get(c) or "").split("\n"))
+                         for c, w in zip(colonne, larghezze)] or [1])
+            if linee > 1:
+                ws.row_dimensions[n].height = 15 * linee
+                for cell in ws[n]:
+                    cell.alignment = a_capo
         ws.freeze_panes = "A2"
         if righe:
             ws.auto_filter.ref = ws.dimensions
@@ -759,6 +845,8 @@ def main():
     ap.add_argument("--colonne", help="colonne da esportare, separate da virgola (default: tutte)")
     ap.add_argument("--unisci-duplicati", action="store_true",
                     help="una sola riga per insegnamento, scaglione o lezione anche se compare in più corsi e piani")
+    ap.add_argument("--lezioni-dal", metavar="GG/MM/AAAA",
+                    help="tieni solo le lezioni che hanno ancora date da quel giorno in poi (es. la data di oggi)")
     ap.add_argument("--calendario", choices=list(RAGGRUPPA), help="crea l'orario settimanale HTML raggruppato così")
     ap.add_argument("--out", help="file di destinazione (default: in output/esportazioni/)")
     ap.add_argument("--elenca-valori", metavar="COLONNA", help="mostra i valori presenti in una colonna ed esce")
@@ -767,7 +855,11 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     dati = carica(a.file)
-    tab = tabelle(dati)
+    try:
+        dal = leggi_data(a.lezioni_dal)
+    except ValueError:
+        sys.exit(f"--lezioni-dal: «{a.lezioni_dal}» non è una data nel formato GG/MM/AAAA")
+    tab = tabelle(dati, dal)
     filtri = {}
     for f in a.filtro:
         k, _, v = f.partition("=")

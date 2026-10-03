@@ -132,6 +132,8 @@ piano, anno), così si capisce da sola e si può filtrare per qualunque colonna.
 | `cognomi` | `_righe_cognomi()` → `gruppi_cognomi()` | fascia di cognomi di un piano |
 | `piani` | `_riga_piano()`, `_righe_piani_non_scaricati()` | piano (anche scartati o con errore) |
 
+`tabelle(dati, lezioni_dal)` con una data toglie prima le lezioni già concluse (`_senza_lezioni_concluse()`): è l'opzione *Solo lezioni dal* della scheda 2 e `--lezioni-dal` da terminale.
+
 Le colonne di ogni tabella, e il loro ordine, sono in `COLONNE`; i nomi mostrati all'utente in `LABELS`;
 le descrizioni in `DESCRIZIONI`.
 
@@ -139,6 +141,7 @@ Due logiche da conoscere:
 - **`gruppi_cognomi()`** – ogni insegnamento divide i cognomi a modo suo. Le fasce sono gli intervalli
   tra *tutti* i confini degli scaglioni del piano; per ogni fascia si prende, da ogni insegnamento, lo
   scaglione che la contiene. Esempio nella docstring.
+- **`_giorni_scaglione()`** – il testo delle colonne Lunedì…Sabato. Con `con_nome=True` (Orario per cognome) ogni lezione ha anche insegnamento e docenti, e la sezione se ci sono sezioni parallele dello stesso insegnamento; la stessa lezione in più aule diventa una riga sola (`aula A + aula B`).
 - **`unisci_duplicati()`** – due righe sono "la stessa" se coincidono in tutte le colonne tranne quelle di
   `VARIABILI_PER_PIANO` (corso, piano, link…); quelle colonne diventano elenchi separati da ` | `.
 
