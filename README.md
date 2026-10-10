@@ -117,18 +117,27 @@ Ricerche al volo: interrogano il sito e rispondono in pochi secondi, senza file 
 
    | Ricerca | Cosa trovi | Esempio |
    |---|---|---|
-   | **Chi insegna un insegnamento** | i docenti, ognuno con il suo orario e il suo scaglione. Con le **fasce orarie** in cima trovi, evidenziato in verde, chi le copre tutte | *geometria e algebra lineare*, sede Milano Leonardo, fasce `gio 08:15-10:15, ven 10:15-13:15` → Compagnoni Marco, scaglione BRU – CON |
-   | **Scheda di un docente** | insegnamenti, scaglioni, orario delle lezioni, contatti | *compagnoni*, oppure il codice *245289* |
+   | **Chi insegna un insegnamento** | i docenti, ognuno con il suo orario e il suo scaglione. Con le **fasce orarie** in cima trovi, evidenziato in verde, chi le copre tutte | *geometria e algebra lineare*, sede Milano Leonardo, fasce gio 08:15–10:15 e ven 10:15–13:15 → il docente che le copre entrambe, con il suo scaglione |
+   | **Scheda di un docente** | insegnamenti, scaglioni, orario delle lezioni, contatti | *rossi*, poi scegli il docente dall'elenco |
    | **Insegnamenti e docenti** | chi insegna cosa, per insegnamento o per docente | *analisi matematica 1*, sede Milano Leonardo |
    | **Aule** | chi occupa ogni aula, ora per ora (insegnamento e docente), oppure le **aule libere** in una fascia oraria | Milano Città Studi, 15/10/2026, libere dalle 10:15 alle 12:15 |
-   | **Informazioni su un corso** | piani di studio, elenco dei docenti, programmi interdisciplinari, scambi internazionali | corso *531* |
+   | **Informazioni su un corso** | piani di studio, elenco dei docenti, programmi interdisciplinari, scambi internazionali | scuola Ing. Ind-Inf, corso *Ingegneria Informatica (531)* |
    | **Vecchi ordinamenti** | insegnamenti precedenti al D.M. 509 | *geometria* |
 
-2. **Dati della ricerca**: compaiono solo i campi che servono, ognuno con un esempio accanto. Premi
-   **Cerca** (o Invio).
-   - Le **fasce orarie** si scrivono separate da virgole: un intervallo (`gio 08:15-10:15`) deve essere
-     coperto tutto da una lezione; un'ora sola (`gio 08:15`) vuol dire «a lezione in quel momento». Puoi anche
-     comporle con il menu del giorno, *dalle*, *alle* e **＋ Aggiungi fascia**.
+2. **Dati della ricerca**: compaiono solo i campi che servono, e quasi tutti si **scelgono** invece di
+   scriverli, così si possono inserire solo valori validi. Premi **Cerca** (o Invio).
+   - **Insegnamento, docente, aula**: mentre scrivi compare l'elenco di quelli che corrispondono; sceglilo
+     con un clic (o con le frecce e Invio). Non serve il nome esatto: *geometria ed algebra*, *geom alg* e il
+     codice *082747* trovano tutti GEOMETRIA E ALGEBRA LINEARE (articoli, «e/ed/di» e accenti non contano).
+     La prima volta il programma scarica l'elenco di tutti gli insegnamenti (fino a mezzo minuto); poi lo
+     tiene per 12 ore e i suggerimenti sono immediati.
+   - **Fasce orarie**: scegli giorno, *dalle* e *alle* dai menu e premi **＋ Aggiungi fascia** (anche più
+     volte). Un intervallo (gio 08:15–10:15) deve essere coperto tutto da una lezione; con *alle* «—» vuol dire
+     «a lezione in quel momento».
+   - **Gli orari non devono essere precisi al quarto d'ora**: c'è un margine di 15 minuti, quindi «dalle 16
+     alle 18» trova anche la lezione 16:15–18:15.
+   - **Giorno** delle aule: dal calendario (📅), oppure *Oggi* / *Domani*; *Quanti giorni* da un menu.
+   - **Corso di studi**: prima la scuola, poi il corso dal menu.
 3. **Risultati**: alcune ricerche danno più tabelle (per esempio *Docenti* e *Orario dei docenti*): scegli
    quale vedere sopra la tabella. Doppio clic su una riga per vederla per intero; da lì, o con i pulsanti sotto
    la tabella, apri la **scheda del docente** o la **pagina sul sito**.
@@ -136,6 +145,8 @@ Ricerche al volo: interrogano il sito e rispondono in pochi secondi, senza file 
    I file vanno in `output/ricerche/`.
 
 Le aule vengono dal sito **Spazi** del Politecnico; tutto il resto dai **Manifesti degli Studi**.
+*Chi insegna* unisce due fonti del sito: l'elenco di tutti gli insegnamenti e l'elenco docenti di ogni corso
+che ha l'insegnamento nel piano, perché il primo da solo a volte non ha i docenti di tutti i corsi.
 
 ## Cache
 Le pagine scaricate restano salvate nella cartella `cache/`, così ripetere o ampliare uno scaricamento è
@@ -170,13 +181,15 @@ python esporta.py output/FILE.json --tutte --formato xlsx
 Le ricerche della scheda 3 hanno il loro comando, `cerca.py`:
 ```bash
 python cerca.py chi-insegna "geometria e algebra lineare" --sede MI --fasce "gio 08:15-10:15, ven 10:15-13:15"
+python cerca.py chi-insegna "geometria ed algebra" --sede MI --fasce "gio 8-10"   # orari anche senza minuti
 python cerca.py insegnamenti "analisi matematica 1" --sede MI
 python cerca.py insegnamenti --docente rossi
-python cerca.py docente compagnoni            # oppure il codice: python cerca.py docente 245289
+python cerca.py docente rossi                 # più docenti: elenco con i codici; poi python cerca.py docente CODICE
 python cerca.py aule --sede MIA --giorno 15/10/2026 --cerca geometria
 python cerca.py aule --sede MIA --giorno 15/10/2026 --aula T.2.2 --al 16/10/2026
 python cerca.py aule --sede MIA --giorno 15/10/2026 --libere --dalle 10:15 --alle 12:15
 python cerca.py aule --elenca-sedi            # codici delle sedi per le aule (MIA = Milano Città Studi…)
+python cerca.py corso --elenca --scuola 225   # scuole e corsi con i loro codici
 python cerca.py corso 531 --mostra docenti    # struttura | docenti | interdisciplinari | scambi
 python cerca.py vecchi-ordinamenti --insegnamento geometria
 python cerca.py chi-insegna 082747 --sede MI --out output/ricerche/gal.xlsx   # salva: .xlsx .csv .html .json
@@ -187,6 +200,7 @@ Ogni script mostra le opzioni disponibili con `--help` (anche `python cerca.py c
 
 ## Note
 - Gli orari di inizio e fine vengono ricavati dalla griglia a quarti d'ora del sito.
+- L'elenco di tutti gli insegnamenti usato dalla scheda 3 resta in `cache/ricerche/` per 12 ore.
 - Alcuni insegnamenti non hanno orario: il sito indica "Non esistono occupazioni" oppure l'insegnamento
   è erogato da un ateneo partner.
 - Il programma aspetta un attimo tra una richiesta e l'altra per non sovraccaricare il sito e ne fa al

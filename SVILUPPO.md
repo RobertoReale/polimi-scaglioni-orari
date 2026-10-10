@@ -160,18 +160,21 @@ Due logiche da conoscere:
 
 ## Le ricerche al volo (`cerca.py`)
 
-Ogni ricerca è una funzione che legge il sito **senza cache** (le ricerche devono riflettere il sito di oggi)
-e restituisce un `Risultato`: un titolo, una o più `Tabella(nome, colonne, righe)` (la prima è la principale;
+Ogni ricerca è una funzione che legge il sito **senza cache** (le ricerche devono riflettere il sito di oggi;
+unica eccezione l'elenco degli insegnamenti, sotto) e restituisce un `Risultato`: un titolo, una o più `Tabella(nome, colonne, righe)` (la prima è la principale;
 le righe sono dict come quelle di `esporta.py`) e una lista di `note` per l'utente. `stampa()` lo scrive nel
 terminale, `salva()` su file (Excel: un foglio per tabella; gli altri formati: la tabella principale).
 I nomi leggibili delle colonne nuove sono aggiunti a `esporta.LABELS` in cima al file.
 
 | Funzione | Pagina del sito | Note |
 |---|---|---|
-| `insegnamenti()` | `RicercaInsegnamentiErogatiInLinguaInglesePublic.do` (POST) | nonostante il nome elenca **tutti** gli insegnamenti, ognuno con i docenti e il loro codice `k_doc`. Ogni insegnamento compare sotto un solo corso |
-| `docenti()` | `RicercaPerDocentiPublic.do` (POST, «Cerca Docenti») | se risponde con un errore (ottobre 2026: errore 500 per qualunque nome) cerca il nome con la pagina sopra |
+| `elenco()` | `RicercaInsegnamentiErogatiInLinguaInglesePublic.do` (POST) | nonostante il nome elenca **tutti** gli insegnamenti, ognuno con i docenti e il loro codice `k_doc`. Il campo di ricerca vuole almeno 3 caratteri: con `%%%` la pagina restituisce l'intero anno (4 MB, 15-20 s). Si tiene in memoria e in `cache/ricerche/insegnamenti_ANNO.json` per 12 ore. Ogni insegnamento compare sotto un solo corso, a volte senza i docenti degli altri corsi |
+| `insegnamenti()`, `docenti()` | `elenco()` filtrato in locale | `corrisponde()` confronta i nomi: ogni parola cercata deve essere l'inizio di una parola del nome, in qualsiasi ordine; «e», «ed», «di»… (`PAROLE_VUOTE`) e gli accenti non contano. «Cerca Docenti» del sito non serve più (ottobre 2026: errore 500 per qualunque nome) |
+| `nomi_insegnamenti()`, `nomi_docenti()`, `suggerimenti()` | `elenco()` | le voci proposte dall'interfaccia mentre si scrive |
 | `scheda_docente()` | `RicercaPerDocentiPublic.do?evn_prodotti` (dati) e `?evn_DIDATTICA_AJAX` (insegnamenti) | per ogni insegnamento un blocco `div.tabs` con la tabella degli scaglioni; l'orario si chiede con `?evn_didattica_orario_incarico_AJAX` + il `qs` della scheda «Orario didattico», ed è la stessa griglia dei manifesti (`scarica_manifesti.parse_orario`) |
-| `chi_insegna()` | le due sopra | i docenti dell'insegnamento (prima pagina), poi la scheda di ciascuno (3 in parallelo); `Fascia.coperta_da()` confronta le lezioni con le fasce |
+| `chi_insegna()` | `elenco()`, `RicercaPerInsegnamentoPublic.do` (POST), `MostraFacultyPublic.do`, scheda del docente | i docenti dell'insegnamento dall'elenco, **più** quelli dell'«Elenco docenti» di ogni corso che ha l'insegnamento nel piano (`_altri_docenti()`, se l'insegnamento cercato corrisponde al massimo a `MAX_INSEGNAMENTI_COMPLETI` codici); poi la scheda di ciascuno (3 in parallelo). `Fascia.coperta_da()` confronta le lezioni con le fasce, con `TOLLERANZA` minuti di margine |
+| `aule_sede()` | sito Spazi, griglia di oggi | i nomi delle aule di una sede, per i suggerimenti |
+| `corsi_di_studio()` | `MostraIndirizziPublic.do` | i menu «scuola» e «corso di studi» (una richiesta per scuola) |
 | `occupazione_aule()` | sito Spazi: `OccupazioniGiornoEsatto.do` | serve prima una richiesta `?evn_init=event` per aprire la sessione. Una riga per aula, griglia a quarti d'ora che parte dalle 08:00: l'inizio si ricava dalle etichette delle ore (`innerOrario`, centrate sull'ora). Testo dell'occupazione: «NOME CODICE - COGNOME NOME» |
 | `info_corso()` | `MostraIndirizziPublic.do`, `MostraFacultyPublic.do`, `extra/ProgrammiInterdisciplinariPublic.do`, `extra/ScambiInternazionaliPublic.do` | basta `k_corso_la`, senza scuola. Lette con il lettore generico `_blocchi_pagina()` |
 | `vecchi_ordinamenti()` | `RicercaPerInsegnamentoVOPublic.do` (POST) | |
@@ -183,8 +186,9 @@ legge con `_testo()`, che unisce senza spazi i tag in linea: il sito evidenzia l
 parole (`G<b>E</b>OMETRIA`).
 
 **Aggiungere una ricerca**: una funzione in `cerca.py` che restituisce un `Risultato`, il sotto-comando in
-`main()`; nell'interfaccia una voce in `RICERCHE`, i campi in `SchedaCerca._costruisci()` (con `_campo()` o
-`_menu()`, che mettono anche esempio e spiegazione) e la lettura dei campi in `SchedaCerca._prepara()`.
+`main()`; nell'interfaccia una voce in `RICERCHE`, un metodo `_modulo_…()` con i campi (con `_menu()`,
+`_suggerito()` o, solo per i filtri liberi, `_campo()`: mettono anche esempio e spiegazione) e la lettura dei
+campi in `SchedaCerca._prepara()`. Preferire sempre un menu o un campo con suggerimenti al testo libero.
 `_prepara()` legge **tutti** i valori dei widget prima di avviare il thread: il thread non deve toccare tkinter.
 
 ## L'interfaccia (`interfaccia.py`)
@@ -196,14 +200,18 @@ parole (`G<b>E</b>OMETRIA`).
 - `SchedaCerca` – le ricerche al volo: ① il tipo di ricerca, ② i suoi campi (un riquadro per tipo, si vede
   solo quello scelto), ③ i risultati (una tabella alla volta; doppio clic = dettaglio, con i pulsanti per
   aprire la scheda del docente o la pagina sul sito), ④ il salvataggio. L'anno accademico parte da quello
-  attuale del sito, visibile e modificabile; le sedi partono da «(tutte le sedi)».
+  attuale del sito, visibile e modificabile; le sedi partono da «(tutte le sedi)». Gli elenchi che servono
+  ai campi (anni e sedi, insegnamenti e docenti, aule, corsi) arrivano in sottofondo con `_in_sottofondo()`.
+- `CampoSuggerito` – casella che, mentre si scrive, propone sotto di sé le voci valide (`fonte(testo)`);
+  `valore()` dà il valore della voce scelta (es. il codice del docente). `Calendario` – la scelta del giorno.
 - `Suggerimento` / `aiuto()` – la spiegazione che compare tenendo il mouse su un controllo.
 - `GUIDA` – il testo della finestra *Guida*.
 
 **Thread.** Lo scaricamento (e il caricamento dell'elenco dei corsi) gira in un thread separato, così la
 finestra non si blocca. tkinter non permette di toccare i widget da un altro thread: il thread mette
-messaggi nella coda `self.q` (`"log"`, `"prog"`, `"fine"`, `"finito"`), e `_svuota_coda()`, che gira ogni
-100 ms nel thread della finestra, li trasforma in aggiornamenti.
+messaggi nella coda `self.q` (`"log"`, `"prog"`, `"fine"`, `"finito"`; nella scheda 3 anche `"fatto"`, con la
+funzione da chiamare), e `_svuota_coda()`, che gira ogni 100 ms nel thread della finestra, li trasforma in
+aggiornamenti.
 
 ## Principi da rispettare
 
@@ -255,5 +263,7 @@ Non ci sono test automatici. Il modo più affidabile è confrontare i risultati 
    ```bash
    python cerca.py chi-insegna "geometria e algebra lineare" --sede MI --fasce "gio 08:15-10:15, ven 10:15-13:15"
    ```
-   (2026/27: in cima Compagnoni Marco, 2/2, scaglione BRU – CON). Prova anche `docente`, `aule` (anche
-   `--libere`), `corso` con tutte le `--mostra`, e il salvataggio `--out` in ogni formato.
+   (2026/27: in cima un docente con 2/2; una decina di docenti in tutto, letti anche dagli elenchi docenti
+   di 4 corsi). Deve dare lo stesso risultato con «geometria ed algebra» e `--fasce "gio 8-10, ven 10-13"`.
+   Prova anche `docente`, `aule` (anche `--libere`), `corso` con tutte le `--mostra` e `--elenca`, il
+   salvataggio `--out` in ogni formato, e nella scheda 3 i suggerimenti mentre si scrive.

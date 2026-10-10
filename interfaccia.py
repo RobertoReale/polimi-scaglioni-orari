@@ -13,6 +13,7 @@ Lo scaricamento gira in un thread separato, così la finestra resta reattiva. Il
 mai i widget (tkinter non lo permette): manda messaggi nella coda self.q, che il thread della
 finestra legge ogni 100 ms (_svuota_coda) e trasforma in aggiornamenti di registro e barra.
 """
+import calendar
 import os
 import queue
 import re
@@ -75,9 +76,17 @@ GUIDA = [
      "• Vecchi ordinamenti: insegnamenti precedenti al D.M. 509.\n\n"
      "Doppio clic su una riga per vederla per intero; da lì (o con il pulsante sotto la tabella) apri la "
      "scheda del docente o la pagina sul sito. I risultati si salvano in Excel, CSV, pagina web o JSON.\n\n"
-     "Fasce orarie: un intervallo (gio 08:15-10:15) deve essere coperto tutto da una lezione; un'ora sola "
-     "(gio 08:15) vuol dire «a lezione in quel momento». Si possono scrivere a mano oppure comporre con "
-     "giorno, «dalle», «alle» e «＋ Aggiungi fascia»."),
+     "Quasi tutti i campi si scelgono invece di scriverli, così si possono inserire solo valori validi:\n"
+     "• Insegnamento, docente, aula: mentre scrivi compare l'elenco di quelli che corrispondono; scegli con un "
+     "clic (o con le frecce e Invio). Non serve il nome esatto: «geometria ed algebra», «geom alg» e il codice "
+     "082747 vanno tutti bene. La prima volta il programma scarica l'elenco degli insegnamenti (fino a mezzo "
+     "minuto); poi lo tiene per 12 ore.\n"
+     "• Fasce orarie: scegli giorno, «dalle» e «alle» e premi «＋ Aggiungi fascia». Un intervallo "
+     "(gio 08:15–10:15) deve essere coperto tutto da una lezione; con «alle —» vuol dire «a lezione in quel "
+     "momento».\n"
+     "• Gli orari non devono essere precisi al quarto d'ora: c'è un margine di 15 minuti, quindi «dalle 16 "
+     "alle 18» trova anche la lezione 16:15–18:15.\n"
+     "• Il giorno delle aule si sceglie dal calendario; il corso di studi dai menu «Scuola» e «Corso di studi»."),
     ("Parole da conoscere",
      "• Corso di studi: per esempio Ingegneria Informatica. Ogni corso ha un codice numerico.\n"
      "• Tipo di laurea: Laurea (primo livello), Laurea Magistrale, Ciclo Unico… «ord. 96/23» indica il "
@@ -1371,18 +1380,20 @@ class SchedaEsplora(ttk.Frame):
 # ============================================================ scheda 3: cerca sul sito
 
 TUTTE_SEDI = "(tutte le sedi)"
-GIORNI_FASCE = ["lun", "mar", "mer", "gio", "ven", "sab"]
+NESSUNA_ORA = "—"                # menu delle ore: nessuna scelta
+GIORNI_BREVI = ["lun", "mar", "mer", "gio", "ven", "sab", "dom"]
+MESI = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre",
+        "ottobre", "novembre", "dicembre"]
 
 # le ricerche della scheda 3: chiave -> (titolo del pulsante, spiegazione con un esempio)
 RICERCHE = {
     "chi": ("Chi insegna un insegnamento",
-            "I docenti di un insegnamento, ognuno con il suo orario e il suo scaglione. Se scrivi delle fasce "
+            "I docenti di un insegnamento, ognuno con il suo orario e il suo scaglione. Se aggiungi delle fasce "
             "orarie, in cima trovi chi le copre tutte. Esempio: «geometria e algebra lineare», sede Milano "
-            "Leonardo, fasce «gio 08:15-10:15, ven 10:15-13:15»."),
+            "Leonardo, fasce gio 08:15–10:15 e ven 10:15–13:15."),
     "docente": ("Scheda di un docente",
                 "Insegnamenti, scaglioni (lettere dei cognomi), orario delle lezioni e contatti di un docente. "
-                "Scrivi il cognome o una parte del nome (es. «compagnoni»); se ci sono più docenti, scegli quello "
-                "giusto dall'elenco con un doppio clic."),
+                "Scrivi parte del cognome (es. «rossi») e scegli il docente dall'elenco che compare."),
     "insegnamenti": ("Insegnamenti e docenti",
                      "Gli insegnamenti che contengono le parole cercate (o il codice), ognuno con i suoi docenti. "
                      "Puoi cercare anche solo per docente."),
@@ -1391,15 +1402,166 @@ RICERCHE = {
              "libere in una fascia oraria. I dati sono quelli del sito «Spazi» del Politecnico."),
     "corso": ("Informazioni su un corso di studi",
               "Struttura e piani di studio, elenco dei docenti con i loro insegnamenti, programmi "
-              "interdisciplinari, accordi di scambio internazionali. Serve il codice del corso (es. 531)."),
+              "interdisciplinari, accordi di scambio internazionali. Scegli la scuola e poi il corso."),
     "vecchi": ("Vecchi ordinamenti (prima del D.M. 509)",
                "Insegnamenti delle lauree di vecchio ordinamento, cercati per nome o per docente."),
 }
 
 
+def _ora_dopo(ora, ore=2):
+    """'08:15' -> '10:15' (None se si va oltre l'ultima ora dei menu)."""
+    dopo = f"{int(ora[:2]) + ore:02d}{ora[2:]}"
+    return dopo if dopo in cerca.ORE_LEZIONE else None
+
+
+class CampoSuggerito(ttk.Entry):
+    """Casella di testo che, mentre si scrive, mostra sotto di sé le voci che corrispondono:
+    clic o frecce ↑↓ + Invio per sceglierne una, Esc per chiudere l'elenco.
+    `fonte(testo)` restituisce le voci [(etichetta, valore)]."""
+
+    TASTI_IGNORATI = {"Up", "Down", "Left", "Right", "Return", "Escape", "Tab", "Shift_L", "Shift_R",
+                      "Control_L", "Control_R", "Alt_L", "Alt_R", "Home", "End"}
+
+    def __init__(self, parent, fonte, **kw):
+        self.var = tk.StringVar()
+        super().__init__(parent, textvariable=self.var, **kw)
+        self.fonte = fonte
+        self.scelto = None              # (etichetta, valore) dell'ultima voce scelta
+        self.voci = []
+        self.popup = self.lista = None
+        self.bind("<KeyRelease>", self._tasto)
+        self.bind("<Down>", self._entra_nella_lista)
+        self.bind("<Escape>", lambda e: self.chiudi())
+        self.bind("<Return>", lambda e: self.chiudi(), add="+")
+        self.bind("<FocusOut>", lambda e: self.after(200, self._chiudi_se_altrove))
+        self.bind("<Destroy>", lambda e: self.chiudi())
+
+    def testo(self):
+        return self.var.get().strip()
+
+    def valore(self):
+        """Il valore della voce scelta, se il testo è ancora quello; altrimenti None."""
+        return self.scelto[1] if self.scelto and self.var.get() == self.scelto[0] else None
+
+    def imposta(self, etichetta, valore=None):
+        self.var.set(etichetta)
+        self.scelto = (etichetta, valore) if valore is not None else None
+        self.chiudi()
+
+    def _tasto(self, event):
+        if event.keysym in self.TASTI_IGNORATI:
+            return
+        self.voci = self.fonte(self.testo()) if self.testo() else []
+        if not self.voci:
+            self.chiudi()
+            return
+        self._apri()
+        self.lista.delete(0, "end")
+        for etichetta, _ in self.voci:
+            self.lista.insert("end", etichetta)
+        self.lista.config(height=min(len(self.voci), 10))
+
+    def _apri(self):
+        if self.popup is None:
+            self.popup = tk.Toplevel(self)
+            self.popup.overrideredirect(True)
+            self.popup.attributes("-topmost", True)
+            self.lista = tk.Listbox(self.popup, activestyle="dotbox", exportselection=False,
+                                    width=max(int(self.cget("width")), 50))
+            barra = ttk.Scrollbar(self.popup, orient="vertical", command=self.lista.yview)
+            self.lista.config(yscrollcommand=barra.set)
+            barra.pack(side="right", fill="y")
+            self.lista.pack(side="left", fill="both", expand=True)
+            self.lista.bind("<ButtonRelease-1>", lambda e: self._scegli())
+            self.lista.bind("<Return>", lambda e: self._scegli())
+            self.lista.bind("<Escape>", lambda e: (self.chiudi(), self.focus_set()))
+            self.lista.bind("<Up>", self._su)
+            self.lista.bind("<FocusOut>", lambda e: self.after(200, self._chiudi_se_altrove))
+        self.popup.geometry(f"+{self.winfo_rootx()}+{self.winfo_rooty() + self.winfo_height()}")
+
+    def _entra_nella_lista(self, event):
+        if self.popup is not None:
+            self.lista.focus_set()
+            self.lista.selection_clear(0, "end")
+            self.lista.selection_set(0)
+            self.lista.activate(0)
+        return "break"
+
+    def _su(self, event):
+        if self.lista.curselection() in ((0,), ()):
+            self.focus_set()
+            return "break"
+
+    def _scegli(self):
+        sel = self.lista.curselection() if self.lista is not None else ()
+        if sel:
+            self.imposta(*self.voci[sel[0]])
+            self.icursor("end")
+        self.focus_set()
+
+    def _chiudi_se_altrove(self):
+        try:
+            dove = self.focus_get()
+        except (KeyError, tk.TclError):
+            dove = None
+        if dove not in (self, self.lista):
+            self.chiudi()
+
+    def chiudi(self):
+        if self.popup is not None:
+            self.popup.destroy()
+            self.popup = self.lista = None
+
+
+class Calendario(tk.Toplevel):
+    """Finestrella per scegliere un giorno con un clic; ◀ ▶ cambiano mese."""
+
+    def __init__(self, parent, giorno, scelta):
+        super().__init__(parent)
+        self.title("Scegli il giorno")
+        self.resizable(False, False)
+        self.transient(parent.winfo_toplevel())
+        self.giorno, self.scelta = giorno, scelta
+        self.mese = giorno.replace(day=1)
+        self.corpo = ttk.Frame(self, padding=10)
+        self.corpo.pack()
+        self._disegna()
+        self.geometry(f"+{parent.winfo_rootx()}+{parent.winfo_rooty() + parent.winfo_height()}")
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.grab_set()
+
+    def _disegna(self):
+        for w in self.corpo.winfo_children():
+            w.destroy()
+        ttk.Button(self.corpo, text="◀", width=3, command=lambda: self._sposta(-1)).grid(row=0, column=0)
+        ttk.Label(self.corpo, text=f"{MESI[self.mese.month - 1]} {self.mese.year}", anchor="center",
+                  font=("", 10, "bold")).grid(row=0, column=1, columnspan=5, sticky="ew")
+        ttk.Button(self.corpo, text="▶", width=3, command=lambda: self._sposta(1)).grid(row=0, column=6)
+        for c, g in enumerate(GIORNI_BREVI):
+            ttk.Label(self.corpo, text=g, foreground=GRIGIO).grid(row=1, column=c, pady=(6, 2))
+        for r, settimana in enumerate(calendar.monthcalendar(self.mese.year, self.mese.month), 2):
+            for c, d in enumerate(settimana):
+                if d:
+                    giorno = self.mese.replace(day=d)
+                    ttk.Button(self.corpo, text=str(d), width=3,
+                               style="Accent.TButton" if giorno == self.giorno else "TButton",
+                               command=lambda g=giorno: self._scegli(g)).grid(row=r, column=c, padx=1, pady=1)
+
+    def _sposta(self, mesi):
+        n = self.mese.year * 12 + self.mese.month - 1 + mesi
+        self.mese = date(n // 12, n % 12 + 1, 1)
+        self._disegna()
+
+    def _scegli(self, giorno):
+        self.destroy()
+        self.scelta(giorno)
+
+
 class SchedaCerca(ttk.Frame):
     """Ricerche al volo sul sito (cerca.py): non serve scaricare nulla prima, i risultati arrivano
-    in pochi secondi. Ogni ricerca gira in un thread e manda messaggi nella coda self.q."""
+    in pochi secondi. Ogni ricerca gira in un thread e manda messaggi nella coda self.q.
+    Quasi ogni campo è un menu o propone le voci possibili mentre si scrive, così si possono
+    inserire solo valori validi."""
 
     def __init__(self, app, parent):
         super().__init__(parent, padding=10)
@@ -1411,11 +1573,17 @@ class SchedaCerca(ttk.Frame):
         self.righe = []                 # righe mostrate, nell'ordine della tabella
         self.ordine = (None, False)
         self.map_aa, self.map_sede, self.map_sede_aule = {}, {}, {}
+        self.map_scuole, self.map_corsi = {}, {}
         self.var = {}                   # campi di testo: chiave -> StringVar
         self.cb = {}                    # menu: chiave -> Combobox
+        self.campi = {}                 # campi con suggerimenti: chiave -> CampoSuggerito
+        self.voci = {}                  # suggerimenti già calcolati: (tipo, anno, sede) -> [(etichetta, valore)]
+        self.aule = {}                  # sede delle aule -> nomi delle aule
+        self.in_caricamento = set()     # elenchi che si stanno scaricando
+        self.giorno_aule = date.today()
         self._costruisci()
         self._tipo_cambiato()
-        self._carica_scelte()
+        self._in_sottofondo(cerca.scelte, self._scelte_caricate)
         self.after(100, self._svuota_coda)
 
     # ---------------------------------------------------------------- layout
@@ -1441,117 +1609,21 @@ class SchedaCerca(ttk.Frame):
         s2.bind("<Configure>", lambda e: self.lbl_spiega.config(wraplength=max(300, e.width - 30)))
         self.fr_anno = ttk.Frame(s2)
         self.fr_anno.grid(row=1, column=0, sticky="w")
-        lbl = ttk.Label(self.fr_anno, text="Anno accademico", width=24)
-        lbl.grid(row=0, column=0, sticky="w")
-        self.cb_aa = ttk.Combobox(self.fr_anno, state="readonly", width=14)
-        self.cb_aa.grid(row=0, column=1, sticky="w", pady=3)
-        aiuto("L'anno accademico in cui cercare. Parte da quello attuale del sito; l'elenco arriva dal sito.",
-              lbl, self.cb_aa)
+        self.cb_aa = self._menu(self.fr_anno, 0, "aa", "Anno accademico",
+                                "L'anno accademico in cui cercare. Parte da quello attuale del sito.", larghezza=14)
+        self.cb_aa.bind("<<ComboboxSelected>>", lambda e: self._anno_cambiato())
 
         self.moduli = {}
         for k in RICERCHE:
             fr = ttk.Frame(s2)
             fr.grid(row=2, column=0, sticky="ew")
             self.moduli[k] = fr
-
-        # chi insegna
-        fr = self.moduli["chi"]
-        self._campo(fr, 0, "chi_ins", "Insegnamento", "es. geometria e algebra lineare  oppure  082747",
-                    "Il nome dell'insegnamento (anche solo una parte, almeno 3 lettere) oppure il suo codice.")
-        self._menu(fr, 1, "chi_sede", "Sede", "Cerca solo i docenti che insegnano in questa sede.")
-        self._campo(fr, 2, "chi_fasce", "Fasce orarie (facoltative)", "es. gio 08:15-10:15, ven 10:15-13:15",
-                    "Le lezioni che cerchi, separate da virgole. Un intervallo (gio 08:15-10:15) deve essere "
-                    "coperto tutto da una lezione; un'ora sola (gio 08:15) vuol dire «a lezione in quel "
-                    "momento». Lascia vuoto per vedere gli orari di tutti i docenti.", larghezza=50)
-        aggiungi = ttk.Frame(fr)
-        aggiungi.grid(row=3, column=1, columnspan=2, sticky="w", pady=(0, 4))
-        self.cb_giorno = ttk.Combobox(aggiungi, state="readonly", width=5, values=GIORNI_FASCE)
-        self.cb_giorno.grid(row=0, column=0)
-        ttk.Label(aggiungi, text="dalle").grid(row=0, column=1, padx=4)
-        self.var["f_dalle"] = tk.StringVar()
-        ttk.Entry(aggiungi, textvariable=self.var["f_dalle"], width=6).grid(row=0, column=2)
-        ttk.Label(aggiungi, text="alle").grid(row=0, column=3, padx=4)
-        self.var["f_alle"] = tk.StringVar()
-        ttk.Entry(aggiungi, textvariable=self.var["f_alle"], width=6).grid(row=0, column=4)
-        b = ttk.Button(aggiungi, text="＋ Aggiungi fascia", command=self._aggiungi_fascia)
-        b.grid(row=0, column=5, padx=(8, 4))
-        aiuto("Un modo guidato per scrivere le fasce: scegli il giorno, scrivi le ore (es. 08:15 e 10:15; "
-              "«alle» si può lasciare vuoto) e premi qui. La fascia si aggiunge al campo sopra.", b, self.cb_giorno)
-        ttk.Button(aggiungi, text="Svuota", command=lambda: self.var["chi_fasce"].set("")).grid(row=0, column=6)
-
-        # scheda docente
-        fr = self.moduli["docente"]
-        self._campo(fr, 0, "doc_chi", "Docente", "es. compagnoni  oppure il codice  245289",
-                    "Il cognome o una parte del nome (almeno 3 lettere), oppure il codice numerico del docente.")
-
-        # insegnamenti e docenti
-        fr = self.moduli["insegnamenti"]
-        self._campo(fr, 0, "ins_testo", "Insegnamento", "es. analisi matematica 1  oppure  082740",
-                    "Parte del nome o del codice dell'insegnamento. Puoi lasciarlo vuoto se cerchi per docente.")
-        self._campo(fr, 1, "ins_doc", "Docente (facoltativo)", "es. rossi",
-                    "Parte del nome del docente. Puoi lasciarlo vuoto se cerchi per insegnamento.")
-        self._menu(fr, 2, "ins_sede", "Sede", "Cerca solo gli insegnamenti di questa sede.")
-
-        # aule
-        fr = self.moduli["aule"]
-        self._menu(fr, 0, "aule_sede", "Sede", "La sede (o il singolo indirizzo) di cui vedere le aule. "
-                   "Milano Leonardo è «Milano Città Studi».")
-        e = self._campo(fr, 1, "aule_giorno", "Giorno", "",
-                        "Il giorno da guardare, scritto come 15/10/2026.", larghezza=12)
-        rapidi = ttk.Frame(fr)
-        rapidi.grid(row=1, column=2, sticky="w", padx=8)
-        for testo, giorni in (("Oggi", 0), ("Domani", 1)):
-            ttk.Button(rapidi, text=testo, width=8, command=lambda g=giorni: self.var["aule_giorno"].set(
-                (date.today() + timedelta(days=g)).strftime("%d/%m/%Y"))).pack(side="left", padx=(0, 4))
-        ttk.Label(rapidi, text="gg/mm/aaaa", foreground=GRIGIO).pack(side="left", padx=4)
-        self._campo(fr, 2, "aule_al", "Fino al (facoltativo)", "per più giorni insieme, al massimo 14",
-                    "Per guardare più giorni di fila: l'ultimo giorno, come 16/10/2026.", larghezza=12)
-        self._campo(fr, 3, "aule_aula", "Aula (facoltativa)", "es. T.2.2",
-                    "Solo questa aula, scritta come sul sito (es. T.2.2, 5.0.1, B.4.4).", larghezza=12)
-        self._campo(fr, 4, "aule_testo", "Parole (facoltative)", "es. geometria  oppure  compagnoni  oppure  082747",
-                    "Tiene solo le occupazioni che contengono tutte queste parole: nome o codice "
-                    "dell'insegnamento, nome del docente.")
-        ore = ttk.Frame(fr)
-        ore.grid(row=5, column=1, columnspan=2, sticky="w", pady=3)
-        lbl = ttk.Label(fr, text="Ore (facoltative)")
-        lbl.grid(row=5, column=0, sticky="w")
-        ttk.Label(ore, text="dalle").pack(side="left")
-        self.var["aule_dalle"] = tk.StringVar()
-        e1 = ttk.Entry(ore, textvariable=self.var["aule_dalle"], width=6)
-        e1.pack(side="left", padx=4)
-        ttk.Label(ore, text="alle").pack(side="left")
-        self.var["aule_alle"] = tk.StringVar()
-        e2 = ttk.Entry(ore, textvariable=self.var["aule_alle"], width=6)
-        e2.pack(side="left", padx=4)
-        ttk.Label(ore, text="es. dalle 10:15 alle 12:15", foreground=GRIGIO).pack(side="left", padx=8)
-        aiuto("Una fascia oraria: con «Chi occupa» mostra le occupazioni in quelle ore; con «Aule libere» le aule "
-              "libere per tutta la fascia (senza ore: gli intervalli liberi tra le 8 e le 20).", lbl, e1, e2)
-        self.var_libere = tk.BooleanVar(value=False)
-        modo = ttk.Frame(fr)
-        modo.grid(row=6, column=1, columnspan=2, sticky="w", pady=(2, 0))
-        ttk.Radiobutton(modo, text="Chi occupa le aule", value=False, variable=self.var_libere).pack(side="left")
-        ttk.Radiobutton(modo, text="Aule libere", value=True, variable=self.var_libere).pack(side="left", padx=12)
-        for e in (e1, e2):
-            e.bind("<Return>", lambda ev: self._cerca())
-
-        # corso
-        fr = self.moduli["corso"]
-        self._campo(fr, 0, "corso_cod", "Codice del corso", "es. 531 (Ingegneria Informatica)",
-                    "Il codice numerico del corso di studi. Lo trovi nella scheda 1, nella colonna «Codice» "
-                    "accanto al nome del corso.", larghezza=10)
-        lbl = ttk.Label(fr, text="Cosa mostrare")
-        lbl.grid(row=1, column=0, sticky="w")
-        pagine = ttk.Frame(fr)
-        pagine.grid(row=1, column=1, columnspan=2, sticky="w", pady=3)
-        self.var_pagina = tk.StringVar(value="struttura")
-        for k, (nome, _) in cerca.PAGINE_CORSO.items():
-            ttk.Radiobutton(pagine, text=nome, value=k, variable=self.var_pagina).pack(side="left", padx=(0, 12))
-        aiuto("La pagina del sito da leggere per questo corso.", lbl)
-
-        # vecchi ordinamenti
-        fr = self.moduli["vecchi"]
-        self._campo(fr, 0, "vo_ins", "Insegnamento", "es. geometria", "Parte del nome o del codice.")
-        self._campo(fr, 1, "vo_doc", "Docente", "es. lella", "Parte del nome del docente.")
+        self._modulo_chi(self.moduli["chi"])
+        self._modulo_docente(self.moduli["docente"])
+        self._modulo_insegnamenti(self.moduli["insegnamenti"])
+        self._modulo_aule(self.moduli["aule"])
+        self._modulo_corso(self.moduli["corso"])
+        self._modulo_vecchi(self.moduli["vecchi"])
 
         piede = ttk.Frame(s2)
         piede.grid(row=3, column=0, sticky="ew", pady=(8, 0))
@@ -1568,6 +1640,131 @@ class SchedaCerca(ttk.Frame):
         self.lbl_stato = ttk.Label(piede, text="Collegamento al sito…", foreground=GRIGIO)
         self.lbl_stato.grid(row=0, column=3, sticky="w")
 
+        self._sezione_risultati()
+        self._sezione_salva()
+
+    # i campi di ogni ricerca
+    def _modulo_chi(self, fr):
+        self._suggerito(fr, 0, "chi_ins", "Insegnamento", "scrivi parte del nome o il codice e scegli",
+                        "Il nome dell'insegnamento (anche solo una parte) o il codice: mentre scrivi compaiono gli "
+                        "insegnamenti che corrispondono. Non serve scrivere il nome esatto: «geometria ed algebra» "
+                        "e «geom alg» vanno bene.", lambda t: self._suggerisci("ins", t, "chi_sede"))
+        self._menu(fr, 1, "chi_sede", "Sede", "Cerca solo i docenti che insegnano in questa sede.")
+        lbl = ttk.Label(fr, text="Fasce orarie (facoltative)", width=24)
+        lbl.grid(row=2, column=0, sticky="w")
+        self.var["chi_fasce"] = tk.StringVar()
+        e = ttk.Entry(fr, textvariable=self.var["chi_fasce"], width=50, state="readonly")
+        e.grid(row=2, column=1, sticky="w", pady=3)
+        ttk.Label(fr, text="si compongono con i menu qui sotto", foreground=GRIGIO).grid(row=2, column=2,
+                                                                                         sticky="w", padx=8)
+        aiuto("Le lezioni che cerchi. Un intervallo (gio 08:15–10:15) deve essere coperto tutto da una lezione; "
+              "senza «alle» vuol dire «a lezione in quel momento». Non serve essere precisi al quarto d'ora: "
+              f"c'è un margine di {cerca.TOLLERANZA} minuti. Lascia vuoto per vedere gli orari di tutti i docenti.",
+              lbl, e)
+        riga = ttk.Frame(fr)
+        riga.grid(row=3, column=1, columnspan=2, sticky="w", pady=(0, 4))
+        self.cb_giorno = ttk.Combobox(riga, state="readonly", width=5, values=GIORNI_BREVI[:6])
+        self.cb_giorno.set("lun")
+        self.cb_giorno.grid(row=0, column=0)
+        ttk.Label(riga, text="dalle").grid(row=0, column=1, padx=4)
+        self.cb_dalle = ttk.Combobox(riga, state="readonly", width=6, values=cerca.ORE_LEZIONE[:-1])
+        self.cb_dalle.set("08:15")
+        self.cb_dalle.grid(row=0, column=2)
+        self.cb_dalle.bind("<<ComboboxSelected>>", lambda e: self._ore_fascia())
+        ttk.Label(riga, text="alle").grid(row=0, column=3, padx=4)
+        self.cb_alle = ttk.Combobox(riga, state="readonly", width=6)
+        self.cb_alle.grid(row=0, column=4)
+        self._ore_fascia()
+        b = ttk.Button(riga, text="＋ Aggiungi fascia", command=self._aggiungi_fascia)
+        b.grid(row=0, column=5, padx=(8, 4))
+        aiuto("Scegli giorno e ore e premi qui: la fascia si aggiunge al campo sopra. «alle —» vuol dire "
+              "«a lezione in quel momento».", b, self.cb_giorno, self.cb_dalle, self.cb_alle)
+        ttk.Button(riga, text="Togli l'ultima", command=self._togli_fascia).grid(row=0, column=6, padx=(0, 4))
+        ttk.Button(riga, text="Svuota", command=lambda: self.var["chi_fasce"].set("")).grid(row=0, column=7)
+
+    def _modulo_docente(self, fr):
+        self._suggerito(fr, 0, "doc_chi", "Docente", "scrivi parte del cognome e scegli",
+                        "Mentre scrivi compaiono i docenti che corrispondono: scegline uno. Se cerchi senza "
+                        "scegliere, vedi l'elenco dei docenti trovati.", lambda t: self._suggerisci("doc", t))
+
+    def _modulo_insegnamenti(self, fr):
+        self._suggerito(fr, 0, "ins_testo", "Insegnamento", "es. analisi matematica 1  oppure  082740",
+                        "Parte del nome o il codice dell'insegnamento (vengono proposti mentre scrivi). Puoi "
+                        "lasciarlo vuoto se cerchi per docente.", lambda t: self._suggerisci("ins", t, "ins_sede"))
+        self._suggerito(fr, 1, "ins_doc", "Docente (facoltativo)", "es. rossi",
+                        "Parte del nome del docente (vengono proposti mentre scrivi). Puoi lasciarlo vuoto se "
+                        "cerchi per insegnamento.", lambda t: self._suggerisci("doc", t))
+        self._menu(fr, 2, "ins_sede", "Sede", "Cerca solo gli insegnamenti di questa sede.")
+
+    def _modulo_aule(self, fr):
+        cb = self._menu(fr, 0, "aule_sede", "Sede", "La sede (o il singolo indirizzo) di cui vedere le aule. "
+                        "Milano Leonardo è «Milano Città Studi».")
+        cb.bind("<<ComboboxSelected>>", lambda e: self._carica_aule())
+        lbl = ttk.Label(fr, text="Giorno", width=24)
+        lbl.grid(row=1, column=0, sticky="w")
+        giorno = ttk.Frame(fr)
+        giorno.grid(row=1, column=1, columnspan=2, sticky="w", pady=3)
+        self.var["aule_giorno"] = tk.StringVar()
+        e = self.e_giorno = ttk.Entry(giorno, textvariable=self.var["aule_giorno"], width=16, state="readonly")
+        e.pack(side="left")
+        e.bind("<Button-1>", lambda ev: self._scegli_giorno())
+        ttk.Button(giorno, text="📅 Scegli…", command=self._scegli_giorno).pack(side="left", padx=(6, 4))
+        for testo, n in (("Oggi", 0), ("Domani", 1)):
+            ttk.Button(giorno, text=testo, width=8,
+                       command=lambda n=n: self._imposta_giorno(date.today() + timedelta(days=n))).pack(
+                side="left", padx=(0, 4))
+        self._imposta_giorno(date.today())
+        aiuto("Il giorno da guardare: scegli dal calendario, oppure «Oggi» o «Domani».", lbl, e)
+        cb = self._menu(fr, 2, "aule_n", "Quanti giorni", f"Per guardare più giorni di fila, a partire da quello "
+                        f"scelto (al massimo {cerca.MAX_GIORNI_AULE}).", larghezza=6)
+        cb.config(values=[str(n) for n in range(1, cerca.MAX_GIORNI_AULE + 1)])
+        cb.set("1")
+        self._suggerito(fr, 3, "aule_aula", "Aula (facoltativa)", "es. T.2.2 – compaiono le aule della sede",
+                        "Solo questa aula: scrivi l'inizio del nome e scegli dall'elenco (prima scegli la sede).",
+                        lambda t: self._suggerisci_aula(t), larghezza=16)
+        self._campo(fr, 4, "aule_testo", "Parole (facoltative)", "es. geometria  oppure  rossi  oppure  082747",
+                    "Tiene solo le occupazioni che contengono tutte queste parole: nome o codice "
+                    "dell'insegnamento, nome del docente.")
+        lbl = ttk.Label(fr, text="Ore (facoltative)")
+        lbl.grid(row=5, column=0, sticky="w")
+        ore = ttk.Frame(fr)
+        ore.grid(row=5, column=1, columnspan=2, sticky="w", pady=3)
+        menu_ore = [NESSUNA_ORA] + cerca.ORE_LEZIONE
+        ttk.Label(ore, text="dalle").pack(side="left")
+        self.cb_aule_dalle = ttk.Combobox(ore, state="readonly", width=6, values=menu_ore)
+        self.cb_aule_dalle.pack(side="left", padx=4)
+        ttk.Label(ore, text="alle").pack(side="left")
+        self.cb_aule_alle = ttk.Combobox(ore, state="readonly", width=6, values=menu_ore)
+        self.cb_aule_alle.pack(side="left", padx=4)
+        for c in (self.cb_aule_dalle, self.cb_aule_alle):
+            c.set(NESSUNA_ORA)
+        aiuto("Una fascia oraria: con «Chi occupa» mostra le occupazioni in quelle ore; con «Aule libere» le aule "
+              "libere per tutta la fascia (senza ore: gli intervalli liberi tra le 8 e le 20).",
+              lbl, self.cb_aule_dalle, self.cb_aule_alle)
+        self.var_libere = tk.BooleanVar(value=False)
+        modo = ttk.Frame(fr)
+        modo.grid(row=6, column=1, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Radiobutton(modo, text="Chi occupa le aule", value=False, variable=self.var_libere).pack(side="left")
+        ttk.Radiobutton(modo, text="Aule libere", value=True, variable=self.var_libere).pack(side="left", padx=12)
+
+    def _modulo_corso(self, fr):
+        cb = self._menu(fr, 0, "corso_scuola", "Scuola", "La scuola del corso di studi.", larghezza=70)
+        cb.bind("<<ComboboxSelected>>", lambda e: self._carica_corsi(self.map_scuole.get(cb.get())))
+        self._menu(fr, 1, "corso_cod", "Corso di studi", "Il corso di cui vedere le informazioni.", larghezza=70)
+        lbl = ttk.Label(fr, text="Cosa mostrare")
+        lbl.grid(row=2, column=0, sticky="w")
+        pagine = ttk.Frame(fr)
+        pagine.grid(row=2, column=1, columnspan=2, sticky="w", pady=3)
+        self.var_pagina = tk.StringVar(value="struttura")
+        for k, (nome, _) in cerca.PAGINE_CORSO.items():
+            ttk.Radiobutton(pagine, text=nome, value=k, variable=self.var_pagina).pack(side="left", padx=(0, 12))
+        aiuto("La pagina del sito da leggere per questo corso.", lbl)
+
+    def _modulo_vecchi(self, fr):
+        self._campo(fr, 0, "vo_ins", "Insegnamento", "es. geometria", "Parte del nome o del codice.")
+        self._campo(fr, 1, "vo_doc", "Docente", "es. rossi", "Parte del nome del docente.")
+
+    def _sezione_risultati(self):
         s3 = Sezione(self, "③ Risultati (clic su un'intestazione per ordinare, doppio clic su una riga per i dettagli)")
         s3.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
         s3.columnconfigure(0, weight=1)
@@ -1605,6 +1802,7 @@ class SchedaCerca(ttk.Frame):
                                    command=lambda: self._apri_sito(self._riga_selezionata()))
         self.btn_sito.grid(row=0, column=2)
 
+    def _sezione_salva(self):
         s4 = Sezione(self, "④ Salva i risultati")
         s4.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         formati = [
@@ -1618,22 +1816,40 @@ class SchedaCerca(ttk.Frame):
             b.grid(row=0, column=i, padx=(0, 6))
             aiuto(spiegazione, b)
 
-    def _campo(self, fr, r, chiave, etichetta, esempio, spiegazione, larghezza=40):
-        lbl = ttk.Label(fr, text=etichetta, width=24)
+    # mattoncini dei moduli
+    def _etichetta(self, fr, r, testo):
+        lbl = ttk.Label(fr, text=testo, width=24)
         lbl.grid(row=r, column=0, sticky="w")
+        return lbl
+
+    def _esempio(self, fr, r, esempio):
+        if esempio:
+            ttk.Label(fr, text=esempio, foreground=GRIGIO).grid(row=r, column=2, sticky="w", padx=8)
+
+    def _campo(self, fr, r, chiave, etichetta, esempio, spiegazione, larghezza=40):
+        """Casella di testo libero (solo dove qualsiasi parola va bene, come filtro)."""
+        lbl = self._etichetta(fr, r, etichetta)
         self.var[chiave] = tk.StringVar()
         e = ttk.Entry(fr, textvariable=self.var[chiave], width=larghezza)
         e.grid(row=r, column=1, sticky="w", pady=3)
         e.bind("<Return>", lambda ev: self._cerca())
-        if esempio:
-            ttk.Label(fr, text=esempio, foreground=GRIGIO).grid(row=r, column=2, sticky="w", padx=8)
+        self._esempio(fr, r, esempio)
         aiuto(spiegazione, lbl, e)
         return e
 
-    def _menu(self, fr, r, chiave, etichetta, spiegazione):
-        lbl = ttk.Label(fr, text=etichetta, width=24)
-        lbl.grid(row=r, column=0, sticky="w")
-        cb = self.cb[chiave] = ttk.Combobox(fr, state="readonly", width=38, values=[VUOTO])
+    def _suggerito(self, fr, r, chiave, etichetta, esempio, spiegazione, fonte, larghezza=40):
+        """Casella che propone le voci valide mentre si scrive."""
+        lbl = self._etichetta(fr, r, etichetta)
+        e = self.campi[chiave] = CampoSuggerito(fr, fonte, width=larghezza)
+        e.grid(row=r, column=1, sticky="w", pady=3)
+        e.bind("<Return>", lambda ev: self._cerca(), add="+")
+        self._esempio(fr, r, esempio)
+        aiuto(spiegazione, lbl, e)
+        return e
+
+    def _menu(self, fr, r, chiave, etichetta, spiegazione, larghezza=38):
+        lbl = self._etichetta(fr, r, etichetta)
+        cb = self.cb[chiave] = ttk.Combobox(fr, state="readonly", width=larghezza, values=[VUOTO])
         cb.set(VUOTO)
         cb.grid(row=r, column=1, sticky="w", pady=3)
         aiuto(spiegazione, lbl, cb)
@@ -1651,37 +1867,61 @@ class SchedaCerca(ttk.Frame):
         else:
             self.fr_anno.grid()
         self.lbl_spiega.config(text=RICERCHE[k][1])
+        if k == "corso" and not self.map_scuole and self.map_aa:
+            self._carica_corsi(None)
+
+    # fasce orarie
+    def _ore_fascia(self):
+        """«alle» propone solo le ore dopo «dalle»; di solito una lezione dura due ore."""
+        dalle = self.cb_dalle.get()
+        self.cb_alle.config(values=[NESSUNA_ORA] + [o for o in cerca.ORE_LEZIONE if o > dalle])
+        if self.cb_alle.get() not in self.cb_alle.cget("values") or self.cb_alle.get() <= dalle:
+            self.cb_alle.set(_ora_dopo(dalle) or NESSUNA_ORA)
+
+    def _fasce(self):
+        return [f.strip() for f in self.var["chi_fasce"].get().split(",") if f.strip()]
 
     def _aggiungi_fascia(self):
-        g, dalle, alle = self.cb_giorno.get(), self.var["f_dalle"].get().strip(), self.var["f_alle"].get().strip()
-        try:
-            if not g:
-                raise ValueError("Scegli il giorno.")
-            if not dalle:
-                raise ValueError("Scrivi l'ora di inizio, per esempio 08:15.")
-            fascia = f"{g} {dalle}" + (f"-{alle}" if alle else "")
-            cerca.leggi_fasce(fascia)  # controlla ore e ordine
-        except ValueError as e:
-            messagebox.showwarning("Fascia oraria", str(e))
-            return
-        attuale = self.var["chi_fasce"].get().strip().rstrip(",")
-        self.var["chi_fasce"].set(f"{attuale}, {fascia}" if attuale else fascia)
-        self.var["f_dalle"].set(self.var["f_alle"].get())  # la fascia dopo parte spesso dove finisce questa
-        self.var["f_alle"].set("")
+        alle = self.cb_alle.get()
+        fascia = f"{self.cb_giorno.get()} {self.cb_dalle.get()}" + (f"-{alle}" if alle != NESSUNA_ORA else "")
+        if fascia not in self._fasce():
+            self.var["chi_fasce"].set(", ".join(self._fasce() + [fascia]))
+        if alle != NESSUNA_ORA and alle in self.cb_dalle.cget("values"):
+            self.cb_dalle.set(alle)  # la fascia dopo parte spesso dove finisce questa
+            self._ore_fascia()
 
-    # ---------------------------------------------------------------- scelte dal sito
-    def _carica_scelte(self):
+    def _togli_fascia(self):
+        self.var["chi_fasce"].set(", ".join(self._fasce()[:-1]))
+
+    # giorno delle aule
+    def _imposta_giorno(self, giorno):
+        self.giorno_aule = giorno
+        self.var["aule_giorno"].set(f"{GIORNI_BREVI[giorno.weekday()]} {giorno.strftime('%d/%m/%Y')}")
+
+    def _scegli_giorno(self):
+        Calendario(self.e_giorno, self.giorno_aule, self._imposta_giorno)
+
+    # ---------------------------------------------------------------- elenchi dal sito
+    def _in_sottofondo(self, funzione, al_termine):
+        """Esegue funzione() in un thread; al_termine(risultato, errore) gira poi nel thread della finestra."""
         def run():
             try:
-                self.q.put(("scelte", cerca.scelte(), None))
+                self.q.put(("fatto", al_termine, funzione(), None))
             except Exception as e:
-                self.q.put(("scelte", None, e))
+                self.q.put(("fatto", al_termine, None, e))
         threading.Thread(target=run, daemon=True).start()
+
+    def _stato(self, testo, colore=GRIGIO):
+        if not self.in_corso():  # durante una ricerca la riga di stato racconta la ricerca
+            self.lbl_stato.config(text=testo, foreground=colore)
+
+    def _errore_elenco(self, err):
+        self._stato("Sito non raggiungibile: controlla la connessione e riavvia il programma." if not isinstance(
+            err, ps.ErroreSito) else f"Il sito non risponde ({err}): riprova più tardi.", ROSSO)
 
     def _scelte_caricate(self, sc, err):
         if err:
-            self.lbl_stato.config(text="Sito non raggiungibile: controlla la connessione e riavvia il programma.",
-                                  foreground=ROSSO)
+            self._errore_elenco(err)
             return
         self.map_aa = {nome: cod for cod, nome in sc["aa"]}
         self.cb_aa.config(values=list(self.map_aa))
@@ -1694,7 +1934,82 @@ class SchedaCerca(ttk.Frame):
             self.cb[k].set(TUTTE_SEDI)
         self.map_sede_aule = {nome: cod for cod, nome in sc["sedi_aule"]}
         self.cb["aule_sede"].config(values=list(self.map_sede_aule))
-        self.lbl_stato.config(text="Pronto: scegli cosa cercare, compila i campi e premi «Cerca».", foreground=GRIGIO)
+        self._stato("Pronto: scegli cosa cercare, compila i campi e premi «Cerca».")
+        self._anno_cambiato()
+
+    def _aa(self):
+        return self.map_aa.get(self.cb_aa.get())
+
+    def _anno_cambiato(self):
+        """Prepara in sottofondo l'elenco di insegnamenti e docenti dell'anno, per i suggerimenti."""
+        aa = self._aa()
+        if self.var_tipo.get() == "corso":
+            self._carica_corsi(self.map_scuole.get(self.cb["corso_scuola"].get()))
+        if not aa or cerca.elenco_pronto(aa) or ("elenco", aa) in self.in_caricamento:
+            return
+        self.in_caricamento.add(("elenco", aa))
+        self._stato("Preparo l'elenco di insegnamenti e docenti per i suggerimenti (la prima volta "
+                    "fino a mezzo minuto; nel frattempo puoi già cercare)…")
+
+        def fatto(_, err):
+            self.in_caricamento.discard(("elenco", aa))
+            if err:
+                self._errore_elenco(err)
+            else:
+                self._stato("Pronto: scegli cosa cercare, compila i campi e premi «Cerca».")
+        self._in_sottofondo(lambda: cerca.elenco(aa), fatto)
+
+    def _suggerisci(self, tipo, testo, chiave_sede=None):
+        """Le voci per un CampoSuggerito: insegnamenti («ins», della sede scelta) o docenti («doc»)."""
+        aa = self._aa()
+        if not aa or not cerca.elenco_pronto(aa):
+            return []  # l'elenco arriva tra poco; intanto si può scrivere e cercare
+        sede = self.map_sede.get(self.cb[chiave_sede].get()) if chiave_sede else None
+        chiave = (tipo, aa, sede)
+        if chiave not in self.voci:
+            self.voci[chiave] = (cerca.nomi_insegnamenti(aa, sede) if tipo == "ins" else cerca.nomi_docenti(aa))
+        return cerca.suggerimenti(self.voci[chiave], testo)
+
+    def _carica_aule(self):
+        sede = self.map_sede_aule.get(self.cb["aule_sede"].get())
+        self.campi["aule_aula"].imposta("")
+        if not sede or sede in self.aule or ("aule", sede) in self.in_caricamento:
+            return
+        self.in_caricamento.add(("aule", sede))
+
+        def fatto(aule, err):
+            self.in_caricamento.discard(("aule", sede))
+            if not err:
+                self.aule[sede] = [(a, a) for a in aule]
+        self._in_sottofondo(lambda: cerca.aule_sede(sede), fatto)
+
+    def _suggerisci_aula(self, testo):
+        voci = self.aule.get(self.map_sede_aule.get(self.cb["aule_sede"].get()), [])
+        t = testo.lower()
+        return [v for v in voci if v[0].lower().startswith(t)][:30] or cerca.suggerimenti(voci, testo)
+
+    def _carica_corsi(self, scuola):
+        aa = self._aa()
+        if not aa or ("corsi", aa, scuola) in self.in_caricamento:
+            return
+        self.in_caricamento.add(("corsi", aa, scuola))
+        self.cb["corso_cod"].config(values=[VUOTO])
+        self.cb["corso_cod"].set("(carico l'elenco dei corsi…)")
+
+        def fatto(ris, err):
+            self.in_caricamento.discard(("corsi", aa, scuola))
+            if err:
+                self._errore_elenco(err)
+                return
+            scuole, corsi = ris
+            self.map_scuole = {nome: cod for cod, nome in scuole}
+            self.cb["corso_scuola"].config(values=list(self.map_scuole))
+            if scuola is None and scuole:
+                self.cb["corso_scuola"].set(scuole[0][1])
+            self.map_corsi = {f"{nome} – {tipo}": cod for cod, nome, tipo in corsi}
+            self.cb["corso_cod"].config(values=list(self.map_corsi))
+            self.cb["corso_cod"].set(VUOTO)
+        self._in_sottofondo(lambda: cerca.corsi_di_studio(aa, scuola), fatto)
 
     # ---------------------------------------------------------------- ricerca
     def _prepara(self):
@@ -1703,48 +2018,53 @@ class SchedaCerca(ttk.Frame):
         Tutti i valori vengono letti qui: il thread della ricerca non deve toccare i widget."""
         k = self.var_tipo.get()
         v = {c: s.get().strip() for c, s in self.var.items()}
-        aa = self.map_aa.get(self.cb_aa.get())
+        t = {c: campo.testo() for c, campo in self.campi.items()}
+        aa = self._aa()
         if k not in ("aule", "vecchi") and not aa:
             raise ValueError("Aspetta che il programma si colleghi al sito: l'anno accademico non è ancora caricato.")
         sedi = {c: self.map_sede.get(self.cb[c].get()) for c in ("chi_sede", "ins_sede")}  # None = tutte
-        prog = lambda n, t: self.q.put(("prog", f"Leggo le schede dei docenti: {n} di {t}…"))  # noqa: E731
+        prog = lambda n, tot: self.q.put(("prog", f"Leggo le schede dei docenti: {n} di {tot}…"))  # noqa: E731
         stop = self.stop
         if k == "chi":
-            if len(v["chi_ins"]) < 3:
-                raise ValueError("Scrivi il nome o il codice dell'insegnamento (almeno 3 lettere).")
-            cerca.leggi_fasce(v["chi_fasce"])
-            return (lambda: cerca.chi_insegna(v["chi_ins"], v["chi_fasce"], aa, sedi["chi_sede"], stop=stop,
+            if not cerca.parole(t["chi_ins"]):
+                raise ValueError("Scrivi il nome o il codice dell'insegnamento e sceglilo dall'elenco che compare.")
+            return (lambda: cerca.chi_insegna(t["chi_ins"], v["chi_fasce"], aa, sedi["chi_sede"], stop=stop,
                                               avanzamento=prog), "Cerco i docenti dell'insegnamento…")
         if k == "docente":
-            if len(v["doc_chi"]) < 3 and not v["doc_chi"].isdigit():
-                raise ValueError("Scrivi il cognome del docente (almeno 3 lettere) oppure il suo codice.")
-            return lambda: cerca.scheda_docente(v["doc_chi"], aa, stop=stop), "Cerco il docente…"
+            chi = self.campi["doc_chi"].valore() or t["doc_chi"]  # il codice, se scelto dall'elenco
+            if not cerca.parole(chi):
+                raise ValueError("Scrivi parte del cognome del docente e sceglilo dall'elenco che compare.")
+            return lambda: cerca.scheda_docente(chi, aa, stop=stop), "Cerco il docente…"
         if k == "insegnamenti":
-            if len(v["ins_testo"]) < 3 and len(v["ins_doc"]) < 3:
-                raise ValueError("Scrivi almeno 3 lettere dell'insegnamento o del docente.")
-            return (lambda: cerca.insegnamenti(v["ins_testo"], v["ins_doc"], aa, sedi["ins_sede"], stop=stop),
+            if not cerca.parole(t["ins_testo"]) and not cerca.parole(t["ins_doc"]):
+                raise ValueError("Scrivi l'insegnamento o il docente (vengono proposti mentre scrivi).")
+            return (lambda: cerca.insegnamenti(t["ins_testo"], t["ins_doc"], aa, sedi["ins_sede"], stop=stop),
                     "Cerco gli insegnamenti…")
         if k == "aule":
-            sede_aule = self.map_sede_aule.get(self.cb["aule_sede"].get())
-            libere = self.var_libere.get()
-            if not sede_aule:
+            sede = self.map_sede_aule.get(self.cb["aule_sede"].get())
+            if not sede:
                 raise ValueError("Scegli la sede delle aule.")
-            if not v["aule_giorno"]:
-                raise ValueError("Scrivi il giorno (gg/mm/aaaa) o premi «Oggi».")
-            for c in ("aule_dalle", "aule_alle"):
-                if v[c]:
-                    cerca._minuti(v[c])
-            prog_g = lambda n, t: self.q.put(("prog", f"Leggo le occupazioni: giorno {n} di {t}…"))  # noqa: E731
-            return (lambda: cerca.occupazione_aule(
-                v["aule_giorno"], v["aule_al"] or None, sede_aule, v["aule_aula"] or None, v["aule_testo"] or None,
-                v["aule_dalle"] or None, v["aule_alle"] or None, libere, stop=stop,
-                avanzamento=prog_g), "Leggo l'occupazione delle aule…")
+            aula = t["aule_aula"]
+            aule = [a for a, _ in self.aule.get(sede, [])]
+            if aula and aule and aula.lower() not in (a.lower() for a in aule):
+                raise ValueError(f"Nella sede scelta non c'è un'aula «{aula}»: scrivi l'inizio del nome e "
+                                 "scegli dall'elenco che compare (oppure lascia vuoto per tutte le aule).")
+            dalle, alle = (c.get() if c.get() != NESSUNA_ORA else None for c in (self.cb_aule_dalle, self.cb_aule_alle))
+            if dalle and alle and alle <= dalle:
+                raise ValueError("L'ora «alle» deve venire dopo l'ora «dalle».")
+            dal = self.giorno_aule
+            al = dal + timedelta(days=int(self.cb["aule_n"].get()) - 1)
+            libere = self.var_libere.get()
+            prog_g = lambda n, tot: self.q.put(("prog", f"Leggo le occupazioni: giorno {n} di {tot}…"))  # noqa: E731
+            return (lambda: cerca.occupazione_aule(dal, al, sede, aula or None, v["aule_testo"] or None, dalle,
+                                                   alle, libere, stop=stop, avanzamento=prog_g),
+                    "Leggo l'occupazione delle aule…")
         if k == "corso":
-            if not v["corso_cod"].isdigit():
-                raise ValueError("Scrivi il codice numerico del corso (es. 531). Lo trovi nella scheda 1.")
+            corso = self.map_corsi.get(self.cb["corso_cod"].get())
+            if not corso:
+                raise ValueError("Scegli la scuola e poi il corso di studi.")
             pagina = self.var_pagina.get()
-            return (lambda: cerca.info_corso(v["corso_cod"], pagina, aa, stop=stop),
-                    "Leggo la pagina del corso…")
+            return (lambda: cerca.info_corso(corso, pagina, aa, stop=stop), "Leggo la pagina del corso…")
         if len(v["vo_ins"]) < 3 and len(v["vo_doc"]) < 3:
             raise ValueError("Scrivi almeno 3 lettere dell'insegnamento o del docente.")
         return lambda: cerca.vecchi_ordinamenti(v["vo_ins"], v["vo_doc"], stop=stop), "Cerco nei vecchi ordinamenti…"
@@ -1783,8 +2103,8 @@ class SchedaCerca(ttk.Frame):
         try:
             while True:
                 msg = self.q.get_nowait()
-                if msg[0] == "scelte":
-                    self._scelte_caricate(msg[1], msg[2])
+                if msg[0] == "fatto":       # un elenco scaricato in sottofondo
+                    msg[1](msg[2], msg[3])
                 elif msg[0] == "prog":
                     self.lbl_stato.config(text=msg[1])
                 elif msg[0] == "fine":
@@ -1811,8 +2131,10 @@ class SchedaCerca(ttk.Frame):
             self.lbl_stato.config(text="Ricerca non riuscita.", foreground=ROSSO)
             messagebox.showerror("Ricerca non riuscita", testo)
             return
-        self.lbl_stato.config(text=f"Fatto: {ris.n_righe} righe trovate.", foreground=VERDE)
         self._mostra(ris)
+        t = self._tabella()  # quella aperta: la prima con dei risultati
+        self.lbl_stato.config(text=f"Fatto: {len(t.righe)} righe in «{t.nome}»." if t and t.righe
+                              else "Fatto: nessun risultato.", foreground=VERDE)
 
     # ---------------------------------------------------------------- risultati
     def _mostra(self, ris):
@@ -1898,7 +2220,8 @@ class SchedaCerca(ttk.Frame):
             return
         self.var_tipo.set("docente")
         self._tipo_cambiato()
-        self.var["doc_chi"].set(str(chi))
+        nome = (riga or {}).get("docente") or str(chi)
+        self.campi["doc_chi"].imposta(nome, (riga or {}).get("codice_docente"))
         self._cerca()
 
     def _apri_sito(self, riga):

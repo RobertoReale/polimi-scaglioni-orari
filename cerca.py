@@ -7,8 +7,8 @@ quelle di esporta.py) e qualche nota per l'utente. La usano sia il terminale (ma
 scheda «Cerca sul sito» dell'interfaccia.
 
 LE RICERCHE E LE PAGINE DEL SITO CHE USANO
-    insegnamenti(testo, docente)    insegnamenti con i loro docenti          «Erogati in lingua Inglese» (*)
-    docenti(nome)                   docenti per nome                         Cerca Docenti, altrimenti (*)
+    insegnamenti(testo, docente)    insegnamenti con i loro docenti          elenco (*)
+    docenti(nome)                   docenti per nome                         elenco (*)
     scheda_docente(codice o nome)   dati, insegnamenti, scaglioni e orario   scheda del docente
     chi_insegna(insegnamento, fasce) i docenti di un insegnamento con il loro orario, ordinati
                                     per quante fasce orarie richieste coprono    (*) + scheda del docente
@@ -19,6 +19,13 @@ LE RICERCHE E LE PAGINE DEL SITO CHE USANO
     (*) Nonostante il nome, la pagina «Erogati in lingua Inglese» elenca tutti gli insegnamenti,
         ognuno con i suoi docenti e il loro codice (k_doc). È la fonte più comoda per sapere chi
         insegna cosa, e continua a funzionare quando la pagina di dettaglio dei manifesti è guasta.
+        Cercando «%%%» la pagina restituisce l'elenco completo dell'anno: elenco() lo scarica una
+        volta (15-20 secondi), lo tiene su disco per qualche ora e le ricerche lo filtrano in locale,
+        tollerando parole come «e», «ed», «di» e gli accenti (corrisponde()).
+
+ORARI APPROSSIMATIVI
+    Le lezioni iniziano e finiscono al quarto d'ora (08:15, 10:15…). Ovunque si confrontano orari
+    c'è una tolleranza di TOLLERANZA minuti: «dalle 16 alle 18» trova la lezione 16:15–18:15.
 
 LA SCHEDA DEL DOCENTE (RicercaPerDocentiPublic.do)
     ?evn_prodotti=EVENTO&k_doc=…&aa=…                    dati del docente
@@ -30,22 +37,29 @@ LA SCHEDA DEL DOCENTE (RicercaPerDocentiPublic.do)
 Uso da terminale, esempi:
     python cerca.py chi-insegna "geometria e algebra lineare" --sede MI --fasce "gio 08:15-10:15, ven 10:15-13:15"
     python cerca.py insegnamenti "analisi matematica 1" --sede MI
-    python cerca.py docente compagnoni
+    python cerca.py docente rossi
     python cerca.py aule --sede MIA --giorno 15/10/2026 --cerca geometria
     python cerca.py aule --sede MIA --giorno 15/10/2026 --libere --dalle 10:15 --alle 12:15
+    python cerca.py corso --elenca
     python cerca.py corso 531 --mostra docenti
     python cerca.py vecchi-ordinamenti --insegnamento geometria
 Ogni comando mostra le sue opzioni con --help. Con --out FILE.xlsx (o .csv, .html, .json) salva i risultati.
 """
 import argparse
+import importlib.util
+import json
+import os
 import re
 import shutil
 import sys
+import threading
+import time
+import unicodedata
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from bs4 import Comment, NavigableString
+from bs4 import BeautifulSoup, Comment, NavigableString
 
 import esporta as ex
 import scarica_manifesti as sm
@@ -55,6 +69,7 @@ CONTROLLER = sm.HOST + "/manifesti/manifesti/controller/"
 URL_DOCENTI = CONTROLLER + "ricerche/RicercaPerDocentiPublic.do"
 URL_INS_DOCENTI = CONTROLLER + "ricerche/RicercaInsegnamentiErogatiInLinguaInglesePublic.do"
 URL_VO = CONTROLLER + "ricerche/RicercaPerInsegnamentoVOPublic.do"
+URL_PER_INSEGNAMENTO = CONTROLLER + "ricerche/RicercaPerInsegnamentoPublic.do"
 URL_SPAZI = sm.HOST + "/spazi/spazi/controller/OccupazioniGiornoEsatto.do"
 
 PAGINE_CORSO = {  # chiave: (nome per l'utente, pagina del sito)
@@ -68,6 +83,9 @@ GIORNI_ABBR = {g[:3].lower(): g for g in sm.GIORNI}          # "gio" -> "Gioved�
 GIORNI_SPAZI = {"Lun": "Lunedì", "Mar": "Martedì", "Mer": "Mercoledì", "Gio": "Giovedì",
                 "Ven": "Venerdì", "Sab": "Sabato", "Dom": "Domenica"}
 MAX_GIORNI_AULE = 14
+MAX_INSEGNAMENTI_COMPLETI = 3                        # chi_insegna: oltre, niente elenchi docenti dei corsi
+TOLLERANZA = 15                                      # minuti, vedi «ORARI APPROSSIMATIVI»
+ORE_LEZIONE = [f"{h:02d}:15" for h in range(8, 21)]  # 08:15 … 20:15, per i menu dell'interfaccia
 
 # nomi leggibili delle colonne nuove (gli altri sono in esporta.LABELS)
 ex.LABELS.update({
@@ -142,7 +160,7 @@ def url_docente(k_doc, aa):
 
 
 def _nome_proprio(maiuscolo):
-    """'COMPAGNONI MARCO' -> 'Compagnoni Marco' (l'occupazione aule scrive i nomi in maiuscolo)."""
+    """'ROSSI MARIO' -> 'Rossi Mario' (l'occupazione aule scrive i nomi in maiuscolo)."""
     return " ".join(p.capitalize() if p.isupper() else p for p in maiuscolo.split()) if maiuscolo else ""
 
 
@@ -151,10 +169,38 @@ def _hhmm(minuti):
 
 
 def _minuti(hhmm):
-    m = re.fullmatch(r"\s*(\d{1,2})(?:[:.](\d{2}))?\s*", hhmm or "")
+    """'08:15', '8.15' o '8' -> minuti dalla mezzanotte."""
+    m = re.fullmatch(r"\s*(\d{1,2})(?:[:.h](\d{2}))?\s*", hhmm or "")
     if not m or int(m.group(1)) > 24 or int(m.group(2) or 0) > 59:
-        raise ValueError(f"Ora non valida: «{hhmm}». Scrivila come 08:15.")
+        raise ValueError(f"Ora non valida: «{hhmm}». Scrivila come 08:15 (oppure solo 8).")
     return int(m.group(1)) * 60 + int(m.group(2) or 0)
+
+
+# ============================================================ confronto di nomi
+
+# parole che non servono a distinguere un nome: «geometria ed algebra» = «geometria e algebra»
+PAROLE_VUOTE = set("""e ed o di d del dell dello della dei degli delle da dal dall dalla dai a ad al all allo
+    alla ai agli alle il lo la l i gli le un una uno per con in nel nell nella nei su sul sull sulla tra fra
+    and of the for to on at an""".split())
+
+
+def _normale(testo):
+    """Minuscolo e senza accenti: «Città» -> «citta»."""
+    s = unicodedata.normalize("NFKD", str(testo or ""))
+    return "".join(c for c in s if not unicodedata.combining(c)).lower()
+
+
+def parole(testo):
+    """Le parole significative di un testo, normalizzate."""
+    return [p for p in re.findall(r"[a-z0-9]+", _normale(testo)) if p not in PAROLE_VUOTE]
+
+
+def corrisponde(cercato, *campi):
+    """Vero se ogni parola cercata è l'inizio di una parola dei campi, in qualsiasi ordine.
+    «geometria ed algebra lineare», «geom alg» e «082747» trovano tutti GEOMETRIA E ALGEBRA LINEARE."""
+    cercate = parole(cercato)
+    bersaglio = re.findall(r"[a-z0-9]+", _normale(" ".join(c for c in campi if c)))
+    return bool(cercate) and all(any(b.startswith(p) for b in bersaglio) for p in cercate)
 
 
 # ============================================================ scelte disponibili
@@ -307,15 +353,21 @@ def _messaggi_modulo(page):
 
 # ============================================================ insegnamenti e docenti
 
-def _insegnamenti_docenti(cli, testo="", docente="", aa=None, sede=None, scuola=None):
+TUTTI = "%%%"                                    # la pagina (*) vuole 3 caratteri: «%%%» trova tutto
+CARTELLA_ELENCHI = sm.HERE / "cache" / "ricerche"
+VALIDITA_ELENCO = 12 * 3600                      # secondi: gli insegnamenti cambiano di rado
+# lxml è facoltativo: legge l'elenco completo (4 MB) in metà tempo
+PARSER_VELOCE = "lxml" if importlib.util.find_spec("lxml") else "html.parser"
+
+
+def _insegnamenti_docenti(cli, testo="", docente="", aa=None, sede=None):
     """Righe della pagina (*): una per insegnamento e docente."""
     aa = _aa(aa)
     cli.get(URL_INS_DOCENTI, {"evn_default": "EVENTO", "aa": aa, "lang": "IT"})  # apre la sessione
     html = cli.post(URL_INS_DOCENTI, {
-        "lang": "IT", "aa": aa, "sede": sede or "ALL_SEDI", "k_cf": scuola or "-1", "k_corso_la": "-1",
+        "lang": "IT", "aa": aa, "sede": sede or "ALL_SEDI", "k_cf": "-1", "k_corso_la": "-1",
         "aree": "-1", "codDescr": testo or "", "n_docente": docente or "", "evn_ricercainschinc": "Aggiorna"})
-    page = soup(html)
-    table = page.find("table", class_="TableDati")
+    table = BeautifulSoup(html, PARSER_VELOCE).find("table", class_="TableDati")
     out = []
     if not table:
         return out
@@ -337,12 +389,84 @@ def _insegnamenti_docenti(cli, testo="", docente="", aa=None, sede=None, scuola=
     return out
 
 
-def insegnamenti(testo="", docente="", aa=None, sede=None, scuola=None, log=None, stop=None):
-    """Insegnamenti che contengono `testo` nel nome o nel codice (e/o con un docente che contiene
-    `docente`), ognuno con i suoi docenti."""
-    if len((testo or "").strip()) < 3 and len((docente or "").strip()) < 3:
-        raise ValueError("Scrivi almeno 3 lettere del nome o del codice dell'insegnamento, oppure del docente.")
-    righe = _insegnamenti_docenti(_cli(log, stop), testo, docente, aa, sede, scuola)
+_elenchi = {}                      # anno -> righe di elenco()
+_elenchi_lock = threading.Lock()   # l'interfaccia lo carica in un thread mentre si può già cercare
+
+
+def elenco(aa=None, log=None, stop=None):
+    """Tutti gli insegnamenti dell'anno con i loro docenti (una riga per coppia, come
+    _insegnamenti_docenti). Il sito impiega 15-20 secondi: si tiene in memoria e su disco."""
+    aa = _aa(aa)
+    if _elenchi.get(aa):  # già pronto: senza aspettare chi sta scaricando l'elenco di un altro anno
+        return _elenchi[aa]
+    with _elenchi_lock:
+        if not _elenchi.get(aa):
+            _elenchi[aa] = _leggi_elenco(aa, log, stop)
+        return _elenchi[aa]
+
+
+def elenco_pronto(aa=None):
+    """Vero se elenco(aa) risponde subito (già in memoria)."""
+    return bool(_elenchi.get(_aa(aa)))
+
+
+def _leggi_elenco(aa, log, stop):
+    f = CARTELLA_ELENCHI / f"insegnamenti_{aa}.json"
+    try:
+        if time.time() - f.stat().st_mtime < VALIDITA_ELENCO:
+            return json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass  # niente copia recente: si scarica
+    (log or (lambda m: None))("Scarico l'elenco di tutti gli insegnamenti (una volta ogni qualche ora)…")
+    righe = _insegnamenti_docenti(_cli(log, stop), TUTTI, aa=aa)
+    if not righe:
+        raise ErroreSito("l'elenco degli insegnamenti è vuoto")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(righe, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, f)  # scrittura atomica: mai un file a metà
+    return righe
+
+
+def _filtra(righe, testo="", docente="", sede=None):
+    """Le righe con l'insegnamento `testo` (nome o codice), il docente `docente`, nella sede `sede` (codice)."""
+    nome_sede = _nome_sede(sede) if sede else None
+    return [r for r in righe
+            if (not testo or corrisponde(testo, r["codice"], r["insegnamento"]))
+            and (not docente or corrisponde(docente, r["docente"], r["codice_docente"]))
+            and (not nome_sede or r["sede"] == nome_sede)]
+
+
+def nomi_insegnamenti(aa=None, sede=None):
+    """[(«codice nome», codice)] degli insegnamenti dell'anno (della sede, se data), per i suggerimenti."""
+    visti = {r["codice"]: r["insegnamento"] for r in _filtra(elenco(aa), sede=sede)}
+    return sorted(((f"{c} {n}", c) for c, n in visti.items()), key=lambda v: _normale(v[0][7:]))
+
+
+def nomi_docenti(aa=None):
+    """[(nome, codice)] di tutti i docenti dell'anno, per i suggerimenti."""
+    visti = {r["codice_docente"]: r["docente"] for r in elenco(aa) if r["codice_docente"]}
+    return sorted(((n, c) for c, n in visti.items()), key=lambda v: _normale(v[0]))
+
+
+def suggerimenti(voci, testo, massimo=30):
+    """Le voci [(testo, valore)] che corrispondono a `testo`: prima quelle in cui la prima parola
+    cercata viene presto («geometria» -> GEOMETRIA E ALGEBRA… prima di ANALISI… E GEOMETRIA)."""
+    cercate = parole(testo)
+    if not cercate:
+        return []
+
+    def posizione(voce):
+        nomi = re.findall(r"[a-z0-9]+", _normale(voce[0]))
+        return next((i for i, n in enumerate(nomi) if n.startswith(cercate[0])), len(nomi))
+    return sorted((v for v in voci if corrisponde(testo, v[0])), key=posizione)[:massimo]
+
+
+def insegnamenti(testo="", docente="", aa=None, sede=None, log=None, stop=None):
+    """Insegnamenti con `testo` nel nome o nel codice (e/o con un docente `docente`), ognuno con i suoi docenti."""
+    if not parole(testo) and not parole(docente):
+        raise ValueError("Scrivi il nome o il codice dell'insegnamento, oppure il nome del docente.")
+    righe = _filtra(elenco(aa, log, stop), testo, docente, sede)
     colonne = ["insegnamento", "codice", "docente", "sede", "periodo", "corso", "tipo",
                "codice_docente", "url_docente"]
     ris = Risultato(f"Insegnamenti «{testo or ''}»" + (f", docente «{docente}»" if docente else ""),
@@ -355,49 +479,27 @@ def insegnamenti(testo="", docente="", aa=None, sede=None, scuola=None, log=None
 
 
 def docenti(nome, aa=None, log=None, stop=None):
-    """Docenti il cui nome contiene `nome`. Usa «Cerca Docenti» del sito; se quella pagina non
-    risponde, cerca tra i docenti degli insegnamenti dell'anno (pagina (*))."""
-    if len((nome or "").strip()) < 3:
-        raise ValueError("Scrivi almeno 3 lettere del nome del docente.")
+    """Docenti il cui nome corrisponde a `nome`, ognuno con i suoi insegnamenti dell'anno.
+    (La pagina «Cerca Docenti» del sito non serve: l'elenco degli insegnamenti ha già tutti i docenti.)"""
+    if not parole(nome):
+        raise ValueError("Scrivi il cognome (o una parte del nome) del docente.")
     aa = _aa(aa)
-    cli = _cli(log, stop)
-    righe, note = [], []
-    try:
-        cli.get(URL_DOCENTI, {"evn_default": "EVENTO", "aa": aa, "lang": "IT", "tab_ricerca": "1",
-                              "jaf_currentWFID": "main"})
-        page = soup(cli.post(URL_DOCENTI + "?jaf_currentWFID=main",
-                             {"n_docente": nome, "evn_default": "Esegui Ricerca", "lang": "IT",
-                              "aa": aa, "tab_ricerca": "1"}))
-        visti = set()
-        for a in page.find_all("a", href=True):
-            k = _k_doc(a["href"])
-            if k and k not in visti and _testo(a):
-                visti.add(k)
-                tr = a.find_parent("tr")
-                altro = [txt(td) for td in tr.find_all("td", recursive=False)] if tr else []
-                righe.append({"docente": _testo(a), "codice_docente": k,
-                              "insegnamenti": " · ".join(t for t in altro if t and t != _testo(a)) or None,
-                              "url_docente": url_docente(k, aa)})
-    except ErroreSito:
-        note.append("La pagina «Cerca Docenti» del sito oggi non risponde: ho cercato il nome tra i "
-                    "docenti degli insegnamenti di quest'anno.")
-        per_doc = {}
-        for r in _insegnamenti_docenti(cli, docente=nome, aa=aa):
-            k = r["codice_docente"] or r["docente"]
-            d = per_doc.setdefault(k, {"docente": r["docente"], "codice_docente": r["codice_docente"],
-                                       "insegnamenti": [], "url_docente": r["url_docente"]})
-            voce = f"{r['codice']} {r['insegnamento']} ({r['sede']})"
-            if voce not in d["insegnamenti"]:
-                d["insegnamenti"].append(voce)
-        righe = [{**d, "insegnamenti": " · ".join(d["insegnamenti"])} for d in per_doc.values()]
-    righe.sort(key=lambda r: r["docente"].lower())
+    per_doc = {}
+    for r in _filtra(elenco(aa, log, stop), docente=nome):
+        d = per_doc.setdefault(r["codice_docente"] or r["docente"], {
+            "docente": r["docente"], "codice_docente": r["codice_docente"], "insegnamenti": [],
+            "url_docente": r["url_docente"]})
+        voce = f"{r['codice']} {r['insegnamento']} ({r['sede']})"
+        if voce not in d["insegnamenti"]:
+            d["insegnamenti"].append(voce)
+    righe = sorted(({**d, "insegnamenti": " · ".join(d["insegnamenti"])} for d in per_doc.values()),
+                   key=lambda r: _normale(r["docente"]))
     ris = Risultato(f"Docenti «{nome}»", [Tabella("Docenti", ["docente", "codice_docente", "insegnamenti",
-                                                                "url_docente"], righe)], note)
+                                                                "url_docente"], righe)])
     if not righe:
-        ris.note.append("Nessun docente trovato.")
+        ris.note.append("Nessun docente trovato tra chi insegna quest'anno.")
     elif len(righe) > 1:
-        ris.note.append("Per la scheda di un docente (insegnamenti, scaglioni, orario) usa il suo codice: "
-                        f"es. «docente {righe[0]['codice_docente']}».")
+        ris.note.append("Per la scheda di un docente scegli la sua riga (doppio clic) o usa il suo codice.")
     return ris
 
 
@@ -489,6 +591,9 @@ def scheda_docente(chi, aa=None, log=None, stop=None):
     if not chi.isdigit():
         trovati = docenti(chi, aa, log, stop)
         righe = trovati.tabelle[0].righe
+        uguali = [r for r in righe if _normale(r["docente"]) == _normale(chi)]
+        if len(uguali) == 1:  # «Rossi Mario» non è ambiguo anche se esiste «Rossi Mariolina»
+            righe = uguali
         if len(righe) != 1 or not righe[0]["codice_docente"]:
             trovati.note.insert(0, "Ci sono più docenti con questo nome: scegline uno." if righe
                                 else "Nessun docente con questo nome.")
@@ -534,24 +639,25 @@ class Fascia:
 
     def coperta_da(self, lz):
         """La lezione `lz` copre la fascia: stesso giorno e (intervallo) lo contiene tutto,
-        oppure (istante) è in corso in quel momento."""
+        oppure (istante) è in corso in quel momento. Con TOLLERANZA minuti di margine, così
+        «gio 16-18» trova la lezione 16:15–18:15."""
         if lz.get("giorno") != self.giorno or not lz.get("inizio") or not lz.get("fine"):
             return False
         a, b = _minuti(lz["inizio"]), _minuti(lz["fine"])
         if self.fine is None:
-            return a <= self.inizio < b
-        return a <= self.inizio and b >= self.fine
+            return a - TOLLERANZA <= self.inizio < b
+        return a <= self.inizio + TOLLERANZA and b >= self.fine - TOLLERANZA
 
 
 def leggi_fasce(testo):
-    """«gio 08:15-10:15, ven 10:15» -> [Fascia]. Giorni: lun mar mer gio ven sab (o il nome intero)."""
+    """«gio 08:15-10:15, ven 10:15» -> [Fascia]. Giorni: lun mar mer gio ven sab (o il nome intero);
+    le ore anche senza minuti («gio 8-10»)."""
     fasce = []
     for pezzo in re.split(r"[,;\n]+", testo or ""):
         pezzo = pezzo.strip()
         if not pezzo:
             continue
-        m = re.fullmatch(r"([a-zàèéìòù]+)\s+(\d{1,2}(?:[:.]\d{2})?)\s*(?:[-–]\s*(\d{1,2}(?:[:.]\d{2})?))?",
-                         pezzo.lower())
+        m = re.fullmatch(r"([a-zàèéìòù]+)\s+([\d:.h]+)\s*(?:[-–]\s*([\d:.h]+))?", pezzo.lower())
         giorno = GIORNI_ABBR.get(m.group(1)[:3]) if m else None
         if not giorno:
             raise ValueError(f"Fascia non valida: «{pezzo}». Scrivila come «gio 08:15-10:15» oppure «ven 10:15».")
@@ -576,25 +682,76 @@ def _scaglioni_brevi(scaglioni):
     return " · ".join(f"{k} ({len(v)} corsi/piani)" if len(v) > 1 else f"{k} ({v[0]})" for k, v in gruppi.items())
 
 
+def _corsi_con_insegnamento(cli, codice, aa, sede=None):
+    """I codici dei corsi di studio che hanno l'insegnamento `codice` nel piano («Ricerca per insegnamento»)."""
+    cli.get(URL_PER_INSEGNAMENTO, {"evn_default": "EVENTO", "aa": aa, "lang": "IT"})  # apre la sessione
+    page = soup(cli.post(URL_PER_INSEGNAMENTO + "?jaf_currentWFID=main", {
+        "aa": aa, "k_cf": "-1", "sede": sede or "ALL_SEDI", "tipoCorso": "ALL_TIPO_CORSO", "ac_ins": "0",
+        "semestre": "ALL_SEMESTRI", "aree": "-1", "tipoInsegnamento": "ALL_TIPO_INSEGNAMENTO",
+        "insegn_ricerca": codice, "evn_default": "Esegui Ricerca", "lang": "IT"}))
+    corsi = []
+    for td in page.find_all("td"):  # «Corso di Studi Ing. Ind-Inf (1 liv.)(ord. 96/23) - MI (531) Ingegneria …»
+        m = None if td.find("td") else re.match(r"Corso di Studi .*\((\d+)\)[^()]*$", txt(td))
+        if m and m.group(1) not in corsi:
+            corsi.append(m.group(1))
+    return corsi
+
+
+_docenti_corsi = {}  # (anno, corso) -> {(codice insegnamento, codice docente): nome}
+
+
+def _docenti_del_corso(corso, aa, log=None, stop=None):
+    """Chi insegna cosa secondo l'«Elenco docenti» del corso: {(codice insegnamento, codice docente): nome}."""
+    if (aa, corso) not in _docenti_corsi:
+        out = {}
+        for t in info_corso(corso, "docenti", aa, log, stop).tabelle:
+            for r in t.righe:
+                codice = (r.get("Denominazione insegnamento") or "").split(" - ")[0].strip()
+                if codice and r.get("codice_docente"):
+                    out[(codice, r["codice_docente"])] = r.get("Docente")
+        _docenti_corsi[(aa, corso)] = out
+    return _docenti_corsi[(aa, corso)]
+
+
+def _altri_docenti(cli, codici, aa, sede, log, stop):
+    """{codice docente: nome} di chi insegna `codici` secondo l'elenco docenti dei corsi che li hanno nel piano.
+    Servono perché l'elenco (*) mette ogni insegnamento sotto un solo corso, a volte senza i docenti degli
+    altri corsi. Restituisce anche quanti corsi sono stati letti."""
+    corsi = sorted({c for codice in codici for c in _corsi_con_insegnamento(cli, codice, aa, sede)})
+    out = {}
+    for _, corso, res, err in sm.in_parallelo(lambda c: _docenti_del_corso(c, aa, log, stop), corsi, 3):
+        if err:
+            (log or (lambda m: None))(f"Elenco docenti del corso {corso} non letto: {err}")
+        for (codice, k_doc), nome in (res or {}).items():
+            if codice in codici:
+                out.setdefault(k_doc, nome)
+    return out, len(corsi)
+
+
 def chi_insegna(insegnamento, fasce="", aa=None, sede=None, log=None, stop=None, avanzamento=None):
     """I docenti di un insegnamento con il loro orario. Con `fasce` (es. «gio 08:15-10:15, ven 10:15-13:15»)
     li ordina per quante fasce coprono: in cima chi le copre tutte."""
     fasce = leggi_fasce(fasce) if isinstance(fasce, str) else list(fasce or [])
-    if len((insegnamento or "").strip()) < 3:
-        raise ValueError("Scrivi almeno 3 lettere del nome o del codice dell'insegnamento.")
+    if not parole(insegnamento):
+        raise ValueError("Scrivi il nome o il codice dell'insegnamento.")
     aa = _aa(aa)
     log = log or (lambda m: None)
     avanzamento = avanzamento or (lambda fatti, totale: None)
+    trovati = _filtra(elenco(aa, log, stop), testo=insegnamento, sede=sede)
     cli = _cli(log, stop)
-    trovati = _insegnamenti_docenti(cli, testo=insegnamento, aa=aa, sede=sede)
     titolo = f"Chi insegna «{insegnamento}»" + (f" ({_nome_sede(sede)})" if sede else "")
     if not trovati:
         return Risultato(titolo, [], ["Nessun insegnamento trovato con questo nome o codice."])
     codici = {r["codice"]: r["insegnamento"] for r in trovati}
-    per_doc = {}
-    for r in trovati:
-        if r["codice_docente"]:
-            per_doc.setdefault(r["codice_docente"], r["docente"])
+    per_doc = {r["codice_docente"]: r["docente"] for r in trovati if r["codice_docente"]}
+    note = []
+    if len(codici) <= MAX_INSEGNAMENTI_COMPLETI:
+        log("Cerco i docenti anche negli elenchi dei corsi che hanno l'insegnamento…")
+        altri, n_corsi = _altri_docenti(cli, codici, aa, sede, log, stop)
+        nuovi = {k: v for k, v in altri.items() if k not in per_doc}
+        per_doc.update(nuovi)
+        if n_corsi:
+            note.append(f"Docenti presi dall'elenco degli insegnamenti e dagli elenchi docenti di {n_corsi} corsi.")
     sede_nome = _nome_sede(sede) if sede else None
     log(f"{len(per_doc)} docenti da controllare")
 
@@ -621,11 +778,12 @@ def chi_insegna(insegnamento, fasce="", aa=None, sede=None, log=None, stop=None,
             lezioni += [_lezione(lz, docente=nome, codice=inc["codice"], insegnamento=inc["insegnamento"])
                         for lz in orario]
     righe.sort(key=lambda r: (-r["_n"], r["docente"].lower()))
-    note = []
     if len(codici) > 1:
         note.append(f"«{insegnamento}» corrisponde a {len(codici)} insegnamenti: "
                     + "; ".join(f"{c} {n}" for c, n in codici.items())
-                    + ". Per restringere scrivi il codice.")
+                    + ". Per restringere scrivi il codice"
+                    + ("." if len(codici) <= MAX_INSEGNAMENTI_COMPLETI else
+                       ", così si leggono anche gli elenchi docenti dei corsi e l'elenco è completo."))
     if fasce:
         tutte = [r for r in righe if r["_n"] == len(fasce)]
         if tutte:
@@ -715,6 +873,17 @@ def _intervalli_liberi(occupati, da, a):
     return [(x, y) for x, y in liberi if y > x]
 
 
+_aule = {}  # sede -> nomi delle aule
+
+
+def aule_sede(sede, log=None, stop=None):
+    """I nomi delle aule di una sede del sito Spazi (dalla griglia di oggi), in ordine naturale."""
+    if sede not in _aule:
+        _, aule = _occupazioni_giorno(_cli(log, stop), date.today(), sede)
+        _aule[sede] = sorted(aule, key=lambda a: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", a)])
+    return _aule[sede]
+
+
 def occupazione_aule(giorno, al=None, sede=None, aula=None, testo=None, dalle=None, alle=None, libere=False,
                      log=None, stop=None, avanzamento=None):
     """Chi occupa le aule di una sede, giorno per giorno (dal sito Spazi). Filtri: `aula` (es. T.2.2),
@@ -736,7 +905,6 @@ def occupazione_aule(giorno, al=None, sede=None, aula=None, testo=None, dalle=No
     cli = _cli(log, stop)
     giorni = [g1 + timedelta(days=k) for k in range((g2 - g1).days + 1)]
     occupate, liberi = [], []
-    parole = [p for p in (testo or "").lower().split() if p]
     for n, g in enumerate(giorni, 1):
         righe, aule = _occupazioni_giorno(cli, g, sede)
         avanzamento(n, len(giorni))
@@ -748,19 +916,19 @@ def occupazione_aule(giorno, al=None, sede=None, aula=None, testo=None, dalle=No
             for nome, edificio in aule.items():
                 occ = [(_minuti(r["inizio"]), _minuti(r["fine"])) for r in righe if r["aula"] == nome]
                 lib = _intervalli_liberi(occ, x, y)
-                if dalle or alle:  # libera per tutto l'intervallo chiesto
-                    lib = [(p, q) for p, q in lib if p == x and q == y]
+                if dalle or alle:  # libera per tutto l'intervallo chiesto (a meno della tolleranza)
+                    lib = [(p, q) for p, q in lib if p <= x + TOLLERANZA and q >= y - TOLLERANZA]
                 if lib:
                     liberi.append({"data": g.strftime("%d/%m/%Y"), "giorno": sm.GIORNI[g.weekday()], "aula": nome,
                                    "libera": " · ".join(f"{_hhmm(p)}–{_hhmm(q)}" for p, q in lib),
                                    "edificio": edificio})
             continue
         for r in righe:
-            if parole and not all(p in r["descrizione"].lower() for p in parole):
+            if testo and not corrisponde(testo, r["descrizione"]):
                 continue
-            if da_min is not None and _minuti(r["fine"]) <= da_min:
-                continue
-            if a_min is not None and _minuti(r["inizio"]) >= a_min:
+            if da_min is not None and _minuti(r["fine"]) <= da_min + TOLLERANZA:
+                continue  # finisce prima (o appena dopo) l'inizio della fascia
+            if a_min is not None and _minuti(r["inizio"]) >= a_min - TOLLERANZA:
                 continue
             occupate.append(r)
     nome_sede = dict(scelte()["sedi_aule"]).get(sede, sede)
@@ -782,6 +950,22 @@ def occupazione_aule(giorno, al=None, sede=None, aula=None, testo=None, dalle=No
 
 
 # ============================================================ informazioni su un corso
+
+_corsi = {}  # (anno, scuola) -> (scuole, corsi)
+
+
+def corsi_di_studio(aa=None, scuola=None, log=None, stop=None):
+    """Le scuole [(codice, nome)] e i corsi di studio della `scuola` [(codice, nome, tipo di laurea)],
+    dai menu delle pagine informative. Senza `scuola`: quella proposta dal sito, che è la prima."""
+    aa = _aa(aa)
+    if (aa, scuola) not in _corsi:
+        richiesta = {"evn_default": "EVENTO", "aa": aa, "lang": "IT", **({"k_cf": scuola} if scuola else {})}
+        page = soup(_cli(log, stop).get(PAGINE_CORSO["struttura"][1], richiesta))
+        scuole = [(o["valore"], o["testo"]) for o in sm.select_options(page, "k_cf")]
+        corsi = [(o["valore"], o["testo"], o["gruppo"]) for o in sm.select_options(page, "k_corso_la")]
+        _corsi[(aa, scuola)] = (scuole, corsi)
+    return _corsi[(aa, scuola)]
+
 
 def info_corso(corso, pagina="struttura", aa=None, log=None, stop=None):
     """Una pagina informativa di un corso di studi (codice, es. 531): struttura, docenti,
@@ -916,8 +1100,9 @@ def main(argv=None):
 
     p = comando("chi-insegna", "i docenti di un insegnamento con il loro orario, e chi copre certe fasce orarie")
     p.add_argument("insegnamento", help="nome o codice, es. \"geometria e algebra lineare\" o 082747")
-    p.add_argument("--fasce", default="", help="es. \"gio 08:15-10:15, ven 10:15-13:15\": un intervallo va coperto "
-                   "tutto da una lezione; un'ora sola (\"gio 08:15\") vuol dire «a lezione in quel momento»")
+    p.add_argument("--fasce", default="", help="es. \"gio 08:15-10:15, ven 10:15-13:15\" (anche \"gio 8-10\": "
+                   f"c'è un margine di {TOLLERANZA} minuti): un intervallo va coperto tutto da una lezione; "
+                   "un'ora sola (\"gio 08:15\") vuol dire «a lezione in quel momento»")
     p.add_argument("--sede", help="sede dei manifesti: MI, BV, CO, CR, LC, MN, PC")
 
     p = comando("insegnamenti", "insegnamenti con i loro docenti")
@@ -926,7 +1111,7 @@ def main(argv=None):
     p.add_argument("--sede", help="sede: MI, BV, CO, CR, LC, MN, PC")
 
     p = comando("docente", "scheda di un docente: insegnamenti, scaglioni, orario (o elenco se il nome è ambiguo)")
-    p.add_argument("chi", help="codice del docente (es. 245289) oppure parte del nome")
+    p.add_argument("chi", help="codice del docente (es. 123456) oppure parte del nome")
 
     p = comando("aule", "occupazione delle aule giorno per giorno (sito Spazi), o le aule libere", anno=False)
     p.add_argument("--sede", help="es. MIA (Milano Città Studi), MIB (Bovisa); elenco con --elenca-sedi")
@@ -940,7 +1125,9 @@ def main(argv=None):
     p.add_argument("--elenca-sedi", action="store_true", help="mostra i codici delle sedi ed esce")
 
     p = comando("corso", "informazioni su un corso di studi")
-    p.add_argument("corso", help="codice del corso, es. 531")
+    p.add_argument("corso", nargs="?", help="codice del corso, es. 531 (i codici con --elenca)")
+    p.add_argument("--elenca", action="store_true", help="elenca le scuole e i corsi di studio con il loro codice")
+    p.add_argument("--scuola", help="con --elenca: codice della scuola di cui elencare i corsi")
     p.add_argument("--mostra", choices=list(PAGINE_CORSO), default="struttura",
                    help="struttura (piani di studio), docenti, interdisciplinari, scambi")
 
@@ -967,6 +1154,15 @@ def main(argv=None):
                 return 0 if a.elenca_sedi else 2
             ris = occupazione_aule(a.giorno, a.al, a.sede, a.aula, a.cerca, a.dalle, a.alle, a.libere)
         elif a.comando == "corso":
+            if a.elenca or not a.corso:
+                scuole, corsi = corsi_di_studio(a.aa, a.scuola)
+                print("Scuole (per --scuola):")
+                for codice, nome in scuole:
+                    print(f"  {codice:<6} {nome}")
+                print("\nCorsi di studio:")
+                for codice, nome, tipo in corsi:
+                    print(f"  {codice:<6} {nome} – {tipo}")
+                return 0 if a.elenca else 2
             ris = info_corso(a.corso, a.mostra, a.aa)
         else:
             ris = vecchi_ordinamenti(a.insegnamento, a.docente)
