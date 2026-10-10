@@ -1888,15 +1888,17 @@ class SchedaCerca(ttk.Frame):
 
     def _aggiorna_pulsanti(self):
         r = self._riga_selezionata()
-        self.btn_docente.config(state="normal" if r and r.get("codice_docente") else "disabled")
+        self.btn_docente.config(state="normal" if r and (r.get("codice_docente") or r.get("docente")) else "disabled")
         self.btn_sito.config(state="normal" if self._url(r) else "disabled")
 
     def _apri_docente(self, riga):
-        if not riga or not riga.get("codice_docente"):
+        """La scheda del docente della riga: per codice, oppure per nome (l'occupazione delle aule ha solo il nome)."""
+        chi = (riga or {}).get("codice_docente") or (riga or {}).get("docente")
+        if not chi:
             return
         self.var_tipo.set("docente")
         self._tipo_cambiato()
-        self.var["doc_chi"].set(str(riga["codice_docente"]))
+        self.var["doc_chi"].set(str(chi))
         self._cerca()
 
     def _apri_sito(self, riga):
@@ -1923,7 +1925,7 @@ class SchedaCerca(ttk.Frame):
         testo.config(state="disabled")
         pulsanti = ttk.Frame(w, padding=6)
         pulsanti.pack()
-        if riga.get("codice_docente"):
+        if riga.get("codice_docente") or riga.get("docente"):
             ttk.Button(pulsanti, text="Apri la scheda di questo docente",
                        command=lambda: (w.destroy(), self._apri_docente(riga))).pack(side="left", padx=4)
         if self._url(riga):
@@ -1980,7 +1982,7 @@ def _chiave(v):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Manifesti degli Studi PoliMi – scaglioni e orari")
+        self.title("PoliMi – manifesti, orari e docenti")
         self.chiusura_richiesta = False
         self.protocol("WM_DELETE_WINDOW", self._chiudi)
         self._stile()
