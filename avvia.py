@@ -7,6 +7,7 @@ in una cartella locale (.venv) e apre l'interfaccia grafica.
     python avvia.py              interfaccia grafica
     python avvia.py --terminale  mostra i comandi per l'uso da terminale
 """
+import importlib
 import os
 import shutil
 import subprocess
@@ -80,7 +81,7 @@ def main():
         return
 
     try:
-        import tkinter  # noqa: F401
+        importlib.import_module("tkinter")  # c'è il modulo grafico?
     except ImportError:
         print("Manca il modulo grafico di Python (tkinter).")
         if sys.platform.startswith("linux"):

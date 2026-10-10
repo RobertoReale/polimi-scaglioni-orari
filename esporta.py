@@ -33,6 +33,7 @@ import colorsys
 import csv
 import hashlib
 import html
+import io
 import json
 import re
 import sys
@@ -105,7 +106,7 @@ GIORNI_BREVI = {"Lunedì": "Lun", "Martedì": "Mar", "Mercoledì": "Mer", "Giove
                 "Venerdì": "Ven", "Sabato": "Sab", "Domenica": "Dom"}
 
 
-def label(col):
+def label(col: str) -> str:
     return LABELS.get(col, col)
 
 
@@ -240,8 +241,7 @@ def _giorni_scaglione(lezioni, con_nome=False):
     con_nome: orario di più insegnamenti insieme, quindi accanto a ogni lezione anche l'insegnamento
     e i docenti; la sezione compare se nelle lezioni ci sono più sezioni parallele dello stesso insegnamento.
     La stessa lezione tenuta in più aule contemporaneamente diventa una riga sola."""
-    periodi = [(_data(lz.get("dal")), _data(lz.get("al"))) for lz in lezioni]
-    periodi = [p for p in periodi if p[0] and p[1]]
+    periodi = [(a, b) for a, b in ((_data(lz.get("dal")), _data(lz.get("al"))) for lz in lezioni) if a and b]
     # corsi annuali: orari diversi nei due semestri -> accanto a ogni lezione le sue date
     con_date = any(a[1] < b[0] or b[1] < a[0] for a in periodi for b in periodi)
     sezioni = {}
@@ -480,7 +480,7 @@ def _unisci_consecutive(orario, dal=None):
             b = out[j]
             # le date in cui ci sono entrambi i blocchi (le altre sono prima di `dal`)
             comuni = [x for x in a.get("date_lezioni") or [] if x in set(b.get("date_lezioni") or [])]
-            giorni = sorted(_data(x) for x in comuni if _data(x))
+            giorni = sorted(g for g in map(_data, comuni) if g)
             out[i] = {**a, "fine": b.get("fine"), "durata_min": (a.get("durata_min") or 0) + (b.get("durata_min") or 0),
                       "date_lezioni": comuni or a.get("date_lezioni"),
                       "dal": f"{giorni[0]:%d/%m/%Y}" if giorni else a.get("dal"),
@@ -609,7 +609,7 @@ def esporta_xlsx(path, fogli):
         return ILLEGAL_CHARACTERS_RE.sub("", v) if isinstance(v, str) else v
 
     wb = Workbook()
-    wb.remove(wb.active)
+    wb.remove(wb.worksheets[0])  # il foglio vuoto che c'è sempre
     for nome, (colonne, righe) in fogli.items():
         ws = wb.create_sheet(nome[:31])
         ws.append([label(c) for c in colonne])
@@ -898,7 +898,7 @@ def main():
     ap.add_argument("--out", help="file di destinazione (default: in output/esportazioni/)")
     ap.add_argument("--elenca-valori", metavar="COLONNA", help="mostra i valori presenti in una colonna ed esce")
     a = ap.parse_args()
-    if hasattr(sys.stdout, "reconfigure"):
+    if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     dati = carica(a.file)

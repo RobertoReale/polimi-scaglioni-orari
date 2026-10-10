@@ -57,8 +57,11 @@ Uso da terminale, esempi:
     python cerca.py vecchi-ordinamenti --insegnamento geometria
 Ogni comando mostra le sue opzioni con --help. Con --out FILE.xlsx (o .csv, .html, .json) salva i risultati.
 """
+from __future__ import annotations
+
 import argparse
 import importlib.util
+import io
 import json
 import os
 import re
@@ -71,7 +74,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from bs4 import BeautifulSoup, Comment, NavigableString
+from bs4 import BeautifulSoup
+from bs4.element import Comment, NavigableString
 
 import esporta as ex
 import scarica_manifesti as sm
@@ -157,7 +161,7 @@ def _testo(el):
     pezzi = []
     for d in el.descendants:
         if isinstance(d, NavigableString):
-            if not isinstance(d, Comment) and d.parent.name not in ("script", "style"):
+            if not isinstance(d, Comment) and getattr(d.parent, "name", None) not in ("script", "style"):
                 pezzi.append(str(d))
         elif d.name not in IN_LINEA:
             pezzi.append(" ")
@@ -554,14 +558,14 @@ def _incarichi(cli, k_doc, aa):
         info = (righe_tabella(testa) or [{}])[0] if testa else {}
         denom = info.get("Denominazione Insegnamento", "")
         codice, _, nome = denom.partition(" - ")
-        lingua = None
-        if testa and testa.find("img", src=re.compile(r"flags/")):
-            lingua = re.search(r"flags/(\w+)\.", testa.find("img", src=re.compile(r"flags/"))["src"]).group(1)
+        bandiera = testa.find("img", src=re.compile(r"flags/")) if testa else None
+        m = re.search(r"flags/(\w+)\.", str(bandiera.get("src"))) if bandiera else None
+        lingua = m.group(1) if m else None
         li_or = tabs.find("li", id=f"{tid}_tab_orario")
         li_sc = tabs.find("li", id=f"{tid}_tab_dettaglio")
         contenuto = page.find(id=f"{tid}_contenuto")
         if (contenuto is None or not contenuto.find("table")) and li_sc is not None and li_sc.get("qs"):
-            contenuto = soup(cli.get(URL_DOCENTI + "?evn_didattica_dettaglio_incarico_AJAX=evento" + li_sc["qs"]))
+            contenuto = soup(cli.get(URL_DOCENTI + "?evn_didattica_dettaglio_incarico_AJAX=evento" + str(li_sc["qs"])))
         scaglioni = []
         tab_sc = contenuto.find("table", class_="TableDati") if contenuto else None
         for r in righe_tabella(tab_sc) if tab_sc else []:
@@ -670,8 +674,8 @@ def scheda_docente(chi, aa=None, log=None, stop=None):
 @dataclass
 class Fascia:
     giorno: str          # "Giovedì"
-    inizio: int = None   # minuti dalla mezzanotte; None: tutto il giorno («mar» = ha lezione il martedì)
-    fine: int = None     # None: un istante («gio 08:15» = a lezione alle 08:15)
+    inizio: int | None = None   # minuti dalla mezzanotte; None: tutto il giorno («mar» = ha lezione il martedì)
+    fine: int | None = None     # None: un istante («gio 08:15» = a lezione alle 08:15)
 
     def __str__(self):
         g = self.giorno[:3]
@@ -703,12 +707,12 @@ def leggi_fasce(testo):
             continue
         m = re.fullmatch(r"([a-zàèéìòù]+)(?:\s+([\d:.h]+)\s*(?:[-–]\s*([\d:.h]+))?)?", pezzo.lower())
         giorno = GIORNI_ABBR.get(m.group(1)[:3]) if m else None
-        if not giorno:
+        if not m or not giorno:
             raise ValueError(f"Fascia non valida: «{pezzo}». Scrivila come «gio 08:15-10:15», «ven 10:15» "
                              "oppure solo «mar».")
         inizio = _minuti(m.group(2)) if m.group(2) else None
-        fine = _minuti(m.group(3)) if m.group(3) else None
-        if fine is not None and fine <= inizio:
+        fine = _minuti(m.group(3)) if m.group(3) else None  # c'è solo se c'è anche l'inizio
+        if inizio is not None and fine is not None and fine <= inizio:
             raise ValueError(f"Fascia non valida: «{pezzo}»: la fine viene prima dell'inizio.")
         fasce.append(Fascia(giorno, inizio, fine))
     return fasce
@@ -895,7 +899,7 @@ def _dividi_descrizione(descr):
 
 # ------------------------------------------------------------ griglia delle occupazioni
 
-def _leggi_griglia(page, giorno=None):
+def _leggi_griglia(page, giorno: date | None = None):
     """Le occupazioni di una griglia del sito Spazi: quella di una sede in un giorno, o quella di un'aula
     in un periodo (lì la prima colonna dice il giorno). Restituisce (righe occupate,
     {id aula: {"aula", "edificio"}}). Un'aula con più eventi nella stessa fascia occupa più righe
@@ -936,6 +940,8 @@ def _leggi_griglia(page, giorno=None):
             celle = tds
         else:
             continue
+        if giorno is None:
+            raise ErroreSito("la griglia delle occupazioni non dice il giorno")
         t = inizio_griglia
         for td in celle:
             span = int(td.get("colspan", 1) or 1)
@@ -990,13 +996,13 @@ def _intervalli_liberi(occupati, da, a):
 class FiltroAule:
     """Quali aule: gli stessi filtri della «Ricerca aula» del sito Spazi, più i posti minimi.
     I codici di categoria, tipologia e dipartimento sono quelli di opzioni_aule()."""
-    categoria: str = None            # es. "D" = AULA DIDATTICA
-    tipologia: str = None            # es. "N" = INFORMATIZZATA
-    dipartimento: str = None         # es. "781" = DIPARTIMENTO DI MATEMATICA
+    categoria: str | None = None      # es. "D" = AULA DIDATTICA
+    tipologia: str | None = None      # es. "N" = INFORMATIZZATA
+    dipartimento: str | None = None   # es. "781" = DIPARTIMENTO DI MATEMATICA
     prese_elettriche: bool = False   # postazioni con presa elettrica
     prese_rete: bool = False         # postazioni con presa di rete
     innovativa: bool = False         # allestimento per didattica innovativa
-    posti: int = None                # capienza minima: serve la scheda di ogni aula
+    posti: int | None = None         # capienza minima: serve la scheda di ogni aula
 
     def del_sito(self):
         """Vero se qualche filtro va chiesto al sito (tutti tranne i posti)."""
@@ -1504,13 +1510,11 @@ def stampa(ris, file=None):
 
 def main(argv=None):
     for flusso in (sys.stdout, sys.stderr):  # la console di Windows non sempre sa scrivere «–» o «→»
-        try:
+        if isinstance(flusso, io.TextIOWrapper):
             flusso.reconfigure(errors="replace")
-        except (AttributeError, ValueError):
-            pass
     ap = argparse.ArgumentParser(
         description="Ricerche sul sito del Politecnico di Milano: chi insegna cosa, quando e dove.",
-        epilog="Esempi:\n" + "\n".join(l.strip() for l in __doc__.split("Uso da terminale, esempi:")[1]
+        epilog="Esempi:\n" + "\n".join(l.strip() for l in (__doc__ or "").split("Uso da terminale, esempi:")[1]
                                        .split("Ogni comando")[0].strip().splitlines()),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="comando", metavar="COMANDO", required=True)

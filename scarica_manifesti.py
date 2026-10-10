@@ -33,14 +33,18 @@ Uso da terminale, esempi:
     python scarica_manifesti.py --sede MI --ordinamento 96/23 --anni-corso 1 --periodi annuale,1sem
     python scarica_manifesti.py --corsi 531 --piani primo --no-orari
 """
+from __future__ import annotations
+
 import argparse
 import hashlib
+import io
 import json
 import re
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -88,12 +92,12 @@ class Client:
             raise Interrotto()
 
     def get(self, url, params=None):
-        req = requests.Request("GET", url, params=params).prepare()
-        key = hashlib.sha1(req.url.encode()).hexdigest()
+        completo = requests.Request("GET", url, params=params).prepare().url or url
+        key = hashlib.sha1(completo.encode()).hexdigest()
         f = self.cache_dir / f"{key}.html" if self.cache_dir else None
         if f and f.exists():
             return f.read_text(encoding="utf-8")
-        html = self._richiesta("GET", req.url)
+        html = self._richiesta("GET", completo)
         if f:
             # scrittura atomica: un'interruzione non lascia file a metà nella cache
             tmp = f.with_suffix(f".{threading.get_ident()}.tmp")
@@ -105,7 +109,7 @@ class Client:
         """Invio di un modulo del sito (le ricerche). Mai in cache: la risposta dipende dai dati."""
         return self._richiesta("POST", url, data)
 
-    def _richiesta(self, metodo, url, data=None):
+    def _richiesta(self, metodo, url, data=None) -> str:
         """La pagina come testo. Riprova sugli errori di rete; una pagina di errore del sito
         diventa ErroreSito subito, senza riprovare e senza finire in cache."""
         for attempt in range(1, self.retries + 1):
@@ -128,6 +132,7 @@ class Client:
                 wait = 2 ** attempt
                 self.log(f"    ! errore di rete ({e}); riprovo tra {wait}s")
                 self._pausa(wait)
+        raise ErroreSito(f"nessun tentativo per {url}")  # solo con retries < 1
 
 
 class Interrotto(Exception):
@@ -226,7 +231,7 @@ def header_names(grid, n_header_rows):
 
 def cell_info(cell):
     """Testo della cella + eventuali link (testo, url) e immagini-bandiera."""
-    info = {"testo": txt(cell)}
+    info: dict[str, Any] = {"testo": txt(cell)}
     links = [(txt(a), link_pulito(a["href"])) for a in cell.find_all("a", href=True) if txt(a)]
     if links:
         info["link"] = links
@@ -553,7 +558,7 @@ def fetch_dettaglio(cli, url, with_orari):
         if content is None or not content.find("table"):
             if li_sc is None:
                 continue
-            content = soup(cli.get(BASE + "?evn_DETTAGLIO_SCAGLIONI_AJAX=evento" + li_sc["qs"]))
+            content = soup(cli.get(BASE + "?evn_DETTAGLIO_SCAGLIONI_AJAX=evento" + str(li_sc["qs"])))
         scaglioni, righe = parse_scaglioni(content)
         sez = {
             "id_sezione": sid,
@@ -566,7 +571,7 @@ def fetch_dettaglio(cli, url, with_orari):
                 sez["orario"] = []
                 sez["orario_nota"] = NOTA_ORARIO_ASSENTE
             else:
-                frag = soup(cli.get(BASE + "?evn_DETTAGLIO_ORARIO_AJAX=evento" + li_or["qs"]))
+                frag = soup(cli.get(BASE + "?evn_DETTAGLIO_ORARIO_AJAX=evento" + str(li_or["qs"])))
                 sez["orario"] = parse_orario(frag)
                 if not sez["orario"]:
                     sez["orario_nota"] = nota_orario_vuoto(txt(frag))
@@ -588,7 +593,7 @@ def fetch_dettaglio(cli, url, with_orari):
 PARALLELI_DEFAULT = 4
 
 
-def in_parallelo(funzione, elementi, paralleli):
+def in_parallelo(funzione, elementi, paralleli) -> Iterator[tuple[int, Any, Any, Exception | None]]:
     """Esegue funzione(e) per ogni elemento su `paralleli` thread e restituisce
     (indice, elemento, risultato, errore) man mano che i lavori finiscono.
     Se l'utente interrompe, annulla i lavori non ancora partiti e rilancia Interrotto."""
@@ -628,7 +633,7 @@ def catalogo(aa=None, sede=None, lang="IT", log=print_log, stop=None):
                 for o in select_options(pg, "k_corso_la") if o["valore"]]
 
     elenco = select_options(first, "k_cf")
-    scuole = [None] * len(elenco)
+    scuole: list[dict | None] = [None] * len(elenco)
     for k, sc, corsi, err in in_parallelo(corsi_scuola, elenco, PARALLELI_DEFAULT):
         if err:
             raise err
@@ -649,21 +654,21 @@ PERIODI = {"annuale": "Annuale", "1sem": "1° semestre", "2sem": "2° semestre",
 @dataclass
 class Opzioni:
     """Cosa scaricare. None nei filtri = nessun filtro (tutto)."""
-    aa: str = None                     # anno accademico, es. "2026" (= 2026/2027); None = quello attuale
+    aa: str | None = None              # anno accademico, es. "2026" (= 2026/2027); None = quello attuale
     sede: str = "ALL_SEDI"             # MI, BV, CO, CR, LC, MN, PC, ALL_SEDI
     lang: str = "IT"                   # solo IT: il parser riconosce le intestazioni in italiano
-    scuole: list = None                # codici scuola, es. ["225"]
-    corsi: list = None                 # codici corso di studi, es. ["531", "1030"]
+    scuole: list | None = None         # codici scuola, es. ["225"]
+    corsi: list | None = None          # codici corso di studi, es. ["531", "1030"]
     ordinamento: str = ""              # testo nel tipo di laurea, es. "96/23" o "270"
-    tipo_laurea: list = None           # es. ["Primo Livello", "Magistrale"]
+    tipo_laurea: list | None = None    # es. ["Primo Livello", "Magistrale"]
     anni_corso: list = field(default_factory=lambda: ["0"])  # "1", "2", ... ; "0" = tutti
     piani: object = "tutti"            # "tutti", "primo" oppure lista di codici es. ["IT1"]
     includi_non_diversificato: bool = False  # tieni il piano "***": insegnamenti comuni a tutti i piani
     includi_altre_sedi: bool = False   # tieni anche i piani di sedi diverse da quella scelta
-    periodi: set = None                # {"annuale","1sem","2sem","altro"}; None = tutti
+    periodi: set | None = None         # {"annuale","1sem","2sem","altro"}; None = tutti
     scaglioni: bool = True             # apri il dettaglio di ogni insegnamento
     orari: bool = True                 # scarica anche l'orario didattico
-    out: str = None                    # file JSON; None = nome automatico in output/
+    out: str | None = None             # file JSON; None = nome automatico in output/
     delay: float = 0.4                 # pausa tra le richieste (secondi)
     paralleli: int = PARALLELI_DEFAULT # richieste contemporanee al sito
     cache: str = str(HERE / "cache")   # cartella cache; "" = disattivata
@@ -834,7 +839,7 @@ def scarica(opt, log=print_log, progress=None, stop=None):
         f"anni di corso: {', '.join('tutti' if a == '0' else a for a in anni)}")
 
     params = {k: (sorted(v) if isinstance(v, set) else v) for k, v in asdict(opt).items()}
-    result = {
+    result: dict[str, Any] = {
         "meta": {
             "fonte": BASE,
             "generato_il": datetime.now().isoformat(timespec="seconds"),
@@ -855,7 +860,8 @@ def scarica(opt, log=print_log, progress=None, stop=None):
         log(f"{len(lavori)} corsi di studio da elaborare")
 
         # ---- fase 2: piani ed elenco insegnamenti (più corsi insieme)
-        corsi = result["corsi_di_studio"] = [None] * len(lavori)  # stesso ordine del sito
+        corsi: list[Any] = [None] * len(lavori)
+        result["corsi_di_studio"] = corsi  # stesso ordine del sito
         progress("Elenco insegnamenti", 0, len(lavori))
         elabora = lambda lavoro: _elabora_corso(cli, opt, aa, sede_nome, anni, *lavoro)  # noqa: E731
         for n, (k, (sc, c), res, err) in enumerate(in_parallelo(elabora, lavori, opt.paralleli), 1):
@@ -939,7 +945,7 @@ def main():
     ap.add_argument("--cache", default=str(HERE / "cache"), help="cartella cache; '' per disattivarla")
     args = ap.parse_args()
 
-    if hasattr(sys.stdout, "reconfigure"):
+    if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     if args.elenca:

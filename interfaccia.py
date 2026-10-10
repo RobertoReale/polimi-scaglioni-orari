@@ -160,8 +160,8 @@ class Scorrevole(ttk.Frame):
 
     def __init__(self, parent):
         super().__init__(parent)
-        sfondo = ttk.Style(self).lookup("TFrame", "background") or None
-        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, background=sfondo)
+        sfondo = ttk.Style(self).lookup("TFrame", "background")
+        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, **({"background": sfondo} if sfondo else {}))
         self.barra = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.barra.set)
         self.interno = ttk.Frame(self.canvas)
@@ -543,22 +543,22 @@ class SchedaScarica(ttk.Frame):
         self._riempi_albero()
 
     # ---------------------------------------------------------------- albero
+    def _scuole(self):
+        """Le scuole del catalogo, con i loro corsi (nessuna finché il catalogo non è caricato)."""
+        return self.catalogo["scuole"] if self.catalogo else []
+
     def _selezione_effettiva(self):
         """Corsi selezionati che rispettano il «Tipo di laurea» scelto: sono quelli che verranno scaricati.
         (La casella «Cerca» invece non esclude nulla: serve solo a trovare i corsi.)"""
-        if not self.catalogo:
-            return set()
         tipo = self.cb_tipo.get()
-        return {c["codice"] for s in self.catalogo["scuole"] for c in s["corsi"]
+        return {c["codice"] for s in self._scuole() for c in s["corsi"]
                 if c["codice"] in self.selezionati and (tipo == TUTTI_TIPI or tipo_laurea(c["gruppo"]) == tipo)}
 
     def _corsi_visibili(self):
-        if not self.catalogo:
-            return []
         parole = self.var_cerca.get().lower().split()
         tipo = self.cb_tipo.get()
         out = []
-        for s in self.catalogo["scuole"]:
+        for s in self._scuole():
             for c in s["corsi"]:
                 if tipo != TUTTI_TIPI and tipo_laurea(c["gruppo"]) != tipo:
                     continue
@@ -740,7 +740,7 @@ class SchedaScarica(ttk.Frame):
             errori.append("• scegli almeno un periodo didattico")
         if not self.var_piani.get():
             errori.append("• scegli quali piani di studio includere")
-        if errori:
+        if errori or not aa or not sede:  # (anno e sede mancanti sono già tra gli errori)
             messagebox.showwarning("Mancano delle scelte", "Prima di avviare:\n\n" + "\n".join(errori))
             return None
         try:
@@ -751,7 +751,7 @@ class SchedaScarica(ttk.Frame):
             paralleli = min(8, max(1, int(self.var_paralleli.get())))
         except (tk.TclError, ValueError):
             paralleli = ps.PARALLELI_DEFAULT
-        scuole = sorted({s["codice"] for s in self.catalogo["scuole"]
+        scuole = sorted({s["codice"] for s in self._scuole()
                          for c in s["corsi"] if c["codice"] in corsi})
         return ps.Opzioni(
             aa=aa, sede=sede, scuole=scuole, corsi=sorted(corsi),
@@ -775,7 +775,7 @@ class SchedaScarica(ttk.Frame):
         """Le scelte dell'utente in parole, da confermare prima di partire."""
         # con codice, tipo e ordinamento: lo stesso nome può comparire più volte
         # (es. Ingegneria Informatica ord. 96/23 e ord. 270, oppure laurea e magistrale)
-        nomi = {c["codice"]: f"{c['nome']} · {c['gruppo']}" for s in self.catalogo["scuole"] for c in s["corsi"]}
+        nomi = {c["codice"]: f"{c['nome']} · {c['gruppo']}" for s in self._scuole() for c in s["corsi"]}
         corsi = [nomi.get(c, c) for c in opt.corsi]
         elenco = "\n".join(f"      – {n}" for n in corsi[:8])
         if len(corsi) > 8:
@@ -1447,7 +1447,8 @@ class CampoSuggerito(ttk.Entry):
         self.fonte = fonte
         self.scelto = None              # (etichetta, valore) dell'ultima voce scelta
         self.voci = []
-        self.popup = self.lista = None
+        self.popup: tk.Toplevel | None = None
+        self.lista: tk.Listbox | None = None   # l'elenco dei suggerimenti, solo mentre è aperto
         self.bind("<KeyRelease>", self._tasto)
         self.bind("<Down>", self._entra_nella_lista)
         self.bind("<Escape>", lambda e: self.chiudi())
@@ -1474,14 +1475,15 @@ class CampoSuggerito(ttk.Entry):
         if not self.voci:
             self.chiudi()
             return
-        self._apri()
-        self.lista.delete(0, "end")
+        lista = self._apri()
+        lista.delete(0, "end")
         for etichetta, _ in self.voci:
-            self.lista.insert("end", etichetta)
-        self.lista.config(height=min(len(self.voci), 10))
+            lista.insert("end", etichetta)
+        lista.config(height=min(len(self.voci), 10))
 
     def _apri(self):
-        if self.popup is None:
+        """Apre l'elenco dei suggerimenti sotto la casella (se non è già aperto) e lo restituisce."""
+        if self.popup is None or self.lista is None:
             self.popup = tk.Toplevel(self)
             self.popup.overrideredirect(True)
             self.popup.attributes("-topmost", True)
@@ -1497,9 +1499,10 @@ class CampoSuggerito(ttk.Entry):
             self.lista.bind("<Up>", self._su)
             self.lista.bind("<FocusOut>", lambda e: self.after(200, self._chiudi_se_altrove))
         self.popup.geometry(f"+{self.winfo_rootx()}+{self.winfo_rooty() + self.winfo_height()}")
+        return self.lista
 
     def _entra_nella_lista(self, event):
-        if self.popup is not None:
+        if self.lista is not None:
             self.lista.focus_set()
             self.lista.selection_clear(0, "end")
             self.lista.selection_set(0)
@@ -1507,7 +1510,7 @@ class CampoSuggerito(ttk.Entry):
         return "break"
 
     def _su(self, event):
-        if self.lista.curselection() in ((0,), ()):
+        if self.lista is None or self.lista.curselection() in ((0,), ()):
             self.focus_set()
             return "break"
 
@@ -2413,8 +2416,8 @@ class SchedaCerca(ttk.Frame):
 
     # ---------------------------------------------------------------- salva
     def _salva(self, fmt):
-        t = self._tabella()
-        if t is None or not any(x.righe for x in self.ris.tabelle):
+        t, ris = self._tabella(), self.ris
+        if t is None or ris is None or not any(x.righe for x in ris.tabelle):
             messagebox.showinfo("Niente da salvare", "Fai prima una ricerca che trovi qualcosa.")
             return
         if fmt != "xlsx" and not t.righe:
@@ -2422,17 +2425,17 @@ class SchedaCerca(ttk.Frame):
             return
         cartella = OUTPUT / "ricerche"
         cartella.mkdir(parents=True, exist_ok=True)
-        nome = "".join(ch if ch.isalnum() or ch in "-_ " else "_" for ch in self.ris.titolo)[:70].strip()
+        nome = "".join(ch if ch.isalnum() or ch in "-_ " else "_" for ch in ris.titolo)[:70].strip()
         path = filedialog.asksaveasfilename(initialdir=cartella, initialfile=f"{nome}.{fmt}",
                                             defaultextension=f".{fmt}", filetypes=[(ex.FORMATI[fmt], f"*.{fmt}")])
         if not path:
             return
         if fmt == "xlsx":
-            salva_file(self, path, lambda: cerca.salva(self.ris, path, "xlsx"),
+            salva_file(self, path, lambda: cerca.salva(ris, path, "xlsx"),
                        "Un foglio per ogni tabella: " + ", ".join(f"{x.nome} ({len(x.righe)})"
-                                                                  for x in self.ris.tabelle if x.righe) + ".")
+                                                                  for x in ris.tabelle if x.righe) + ".")
         else:
-            salva_file(self, path, lambda: ex.esporta(path, fmt, t.nome, t.colonne, t.righe, self.ris.titolo),
+            salva_file(self, path, lambda: ex.esporta(path, fmt, t.nome, t.colonne, t.righe, ris.titolo),
                        f"{len(t.righe)} righe salvate ({t.nome}).")
 
 
