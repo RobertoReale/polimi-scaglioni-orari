@@ -508,8 +508,8 @@ def scheda_docente(chi, aa=None, log=None, stop=None):
     righe_or.sort(key=_ordine_lezione)
     voci.append({"voce": "Pagina sul sito", "valore": url_docente(chi, aa)})
     ris = Risultato(f"{nome} – anno accademico {aa}/{int(aa) + 1}", [
-        Tabella("Orario", ["giorno", "inizio", "fine", "insegnamento", "codice", "aula", "edificio",
-                           "attivita", "dal", "al"], righe_or),
+        Tabella("Orario", ["giorno", "inizio", "fine", "aula", "insegnamento", "codice", "dal", "al",
+                           "edificio", "attivita"], righe_or),
         Tabella("Insegnamenti e scaglioni", ["codice", "insegnamento", "corso", "track", "da", "a", "cfu",
                                              "periodo", "sede", "ruolo", "iscritti"], righe_sc),
         Tabella("Docente", ["voce", "valore"], voci)])
@@ -640,8 +640,8 @@ def chi_insegna(insegnamento, fasce="", aa=None, sede=None, log=None, stop=None,
         "orario", "scaglioni", "insegnamento", "codice", "sede", "codice_docente", "url_docente"]
     return Risultato(titolo + (f" – fasce: {', '.join(map(str, fasce))}" if fasce else ""), [
         Tabella("Docenti", colonne, righe),
-        Tabella("Orario dei docenti", ["docente", "giorno", "inizio", "fine", "aula", "edificio", "insegnamento",
-                                       "codice", "attivita", "dal", "al"], lezioni)], note)
+        Tabella("Orario dei docenti", ["docente", "giorno", "inizio", "fine", "aula", "insegnamento", "codice",
+                                       "dal", "al", "edificio", "attivita"], lezioni)], note)
 
 
 # ============================================================ occupazione aule (sito Spazi)
