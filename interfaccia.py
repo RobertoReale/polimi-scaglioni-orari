@@ -83,7 +83,7 @@ GUIDA = [
      "minuto); poi lo tiene per 12 ore.\n"
      "• Fasce orarie: scegli giorno, «dalle» e «alle» e premi «＋ Aggiungi fascia». Un intervallo "
      "(gio 08:15–10:15) deve essere coperto tutto da una lezione; con «alle —» vuol dire «a lezione in quel "
-     "momento».\n"
+     "momento»; con «dalle: tutto il giorno» basta che abbia lezione quel giorno.\n"
      "• Gli orari non devono essere precisi al quarto d'ora: c'è un margine di 15 minuti, quindi «dalle 16 "
      "alle 18» trova anche la lezione 16:15–18:15.\n"
      "• Il giorno delle aule si sceglie dal calendario; il corso di studi dai menu «Scuola» e «Corso di studi»."),
@@ -1381,6 +1381,7 @@ class SchedaEsplora(ttk.Frame):
 
 TUTTE_SEDI = "(tutte le sedi)"
 NESSUNA_ORA = "—"                # menu delle ore: nessuna scelta
+TUTTO_IL_GIORNO = "tutto il giorno"  # fascia oraria: qualunque lezione in quel giorno
 GIORNI_BREVI = ["lun", "mar", "mer", "gio", "ven", "sab", "dom"]
 MESI = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre",
         "ottobre", "novembre", "dicembre"]
@@ -1658,7 +1659,7 @@ class SchedaCerca(ttk.Frame):
         ttk.Label(fr, text="si compongono con i menu qui sotto", foreground=GRIGIO).grid(row=2, column=2,
                                                                                          sticky="w", padx=8)
         aiuto("Le lezioni che cerchi. Un intervallo (gio 08:15–10:15) deve essere coperto tutto da una lezione; "
-              "senza «alle» vuol dire «a lezione in quel momento». Non serve essere precisi al quarto d'ora: "
+              "senza «alle» vuol dire «a lezione in quel momento»; il giorno da solo «a lezione quel giorno». Non serve essere precisi al quarto d'ora: "
               f"c'è un margine di {cerca.TOLLERANZA} minuti. Lascia vuoto per vedere gli orari di tutti i docenti.",
               lbl, e)
         riga = ttk.Frame(fr)
@@ -1667,7 +1668,8 @@ class SchedaCerca(ttk.Frame):
         self.cb_giorno.set("lun")
         self.cb_giorno.grid(row=0, column=0)
         ttk.Label(riga, text="dalle").grid(row=0, column=1, padx=4)
-        self.cb_dalle = ttk.Combobox(riga, state="readonly", width=6, values=cerca.ORE_LEZIONE[:-1])
+        self.cb_dalle = ttk.Combobox(riga, state="readonly", width=14,
+                                     values=[TUTTO_IL_GIORNO] + cerca.ORE_LEZIONE[:-1])
         self.cb_dalle.set("08:15")
         self.cb_dalle.grid(row=0, column=2)
         self.cb_dalle.bind("<<ComboboxSelected>>", lambda e: self._ore_fascia())
@@ -1677,8 +1679,9 @@ class SchedaCerca(ttk.Frame):
         self._ore_fascia()
         b = ttk.Button(riga, text="＋ Aggiungi fascia", command=self._aggiungi_fascia)
         b.grid(row=0, column=5, padx=(8, 4))
-        aiuto("Scegli giorno e ore e premi qui: la fascia si aggiunge al campo sopra. «alle —» vuol dire "
-              "«a lezione in quel momento».", b, self.cb_giorno, self.cb_dalle, self.cb_alle)
+        aiuto("Scegli giorno e ore e premi qui: la fascia si aggiunge al campo sopra. «dalle: tutto il giorno» "
+              "vuol dire «ha lezione quel giorno, a qualunque ora»; «alle —» vuol dire «a lezione in quel "
+              "momento».", b, self.cb_giorno, self.cb_dalle, self.cb_alle)
         ttk.Button(riga, text="Togli l'ultima", command=self._togli_fascia).grid(row=0, column=6, padx=(0, 4))
         ttk.Button(riga, text="Svuota", command=lambda: self.var["chi_fasce"].set("")).grid(row=0, column=7)
 
@@ -1874,6 +1877,13 @@ class SchedaCerca(ttk.Frame):
     def _ore_fascia(self):
         """«alle» propone solo le ore dopo «dalle»; di solito una lezione dura due ore."""
         dalle = self.cb_dalle.get()
+        if dalle == TUTTO_IL_GIORNO:
+            self.cb_alle.config(values=[NESSUNA_ORA], state="disabled")
+            self.cb_alle.set(NESSUNA_ORA)
+            return
+        if str(self.cb_alle.cget("state")) == "disabled":  # si torna da «tutto il giorno»
+            self.cb_alle.set("")
+        self.cb_alle.config(state="readonly")
         self.cb_alle.config(values=[NESSUNA_ORA] + [o for o in cerca.ORE_LEZIONE if o > dalle])
         if self.cb_alle.get() not in self.cb_alle.cget("values") or self.cb_alle.get() <= dalle:
             self.cb_alle.set(_ora_dopo(dalle) or NESSUNA_ORA)
@@ -1882,8 +1892,10 @@ class SchedaCerca(ttk.Frame):
         return [f.strip() for f in self.var["chi_fasce"].get().split(",") if f.strip()]
 
     def _aggiungi_fascia(self):
-        alle = self.cb_alle.get()
-        fascia = f"{self.cb_giorno.get()} {self.cb_dalle.get()}" + (f"-{alle}" if alle != NESSUNA_ORA else "")
+        dalle, alle = self.cb_dalle.get(), self.cb_alle.get()
+        fascia = self.cb_giorno.get()
+        if dalle != TUTTO_IL_GIORNO:
+            fascia += f" {dalle}" + (f"-{alle}" if alle != NESSUNA_ORA else "")
         if fascia not in self._fasce():
             self.var["chi_fasce"].set(", ".join(self._fasce() + [fascia]))
         if alle != NESSUNA_ORA and alle in self.cb_dalle.cget("values"):

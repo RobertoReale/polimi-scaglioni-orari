@@ -133,7 +133,7 @@ Ricerche al volo: interrogano il sito e rispondono in pochi secondi, senza file 
      tiene per 12 ore e i suggerimenti sono immediati.
    - **Fasce orarie**: scegli giorno, *dalle* e *alle* dai menu e premi **＋ Aggiungi fascia** (anche più
      volte). Un intervallo (gio 08:15–10:15) deve essere coperto tutto da una lezione; con *alle* «—» vuol dire
-     «a lezione in quel momento».
+     «a lezione in quel momento»; con *dalle* «tutto il giorno» basta che abbia lezione quel giorno.
    - **Gli orari non devono essere precisi al quarto d'ora**: c'è un margine di 15 minuti, quindi «dalle 16
      alle 18» trova anche la lezione 16:15–18:15.
    - **Giorno** delle aule: dal calendario (📅), oppure *Oggi* / *Domani*; *Quanti giorni* da un menu.
@@ -182,6 +182,7 @@ Le ricerche della scheda 3 hanno il loro comando, `cerca.py`:
 ```bash
 python cerca.py chi-insegna "geometria e algebra lineare" --sede MI --fasce "gio 08:15-10:15, ven 10:15-13:15"
 python cerca.py chi-insegna "geometria ed algebra" --sede MI --fasce "gio 8-10"   # orari anche senza minuti
+python cerca.py chi-insegna "geometria ed algebra" --sede MI --fasce "mar, gio"   # solo i giorni
 python cerca.py insegnamenti "analisi matematica 1" --sede MI
 python cerca.py insegnamenti --docente rossi
 python cerca.py docente rossi                 # più docenti: elenco con i codici; poi python cerca.py docente CODICE

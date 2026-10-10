@@ -630,19 +630,23 @@ def scheda_docente(chi, aa=None, log=None, stop=None):
 @dataclass
 class Fascia:
     giorno: str          # "Giovedì"
-    inizio: int          # minuti dalla mezzanotte
+    inizio: int = None   # minuti dalla mezzanotte; None: tutto il giorno («mar» = ha lezione il martedì)
     fine: int = None     # None: un istante («gio 08:15» = a lezione alle 08:15)
 
     def __str__(self):
         g = self.giorno[:3]
+        if self.inizio is None:
+            return g
         return f"{g} {_hhmm(self.inizio)}" + (f"–{_hhmm(self.fine)}" if self.fine is not None else "")
 
     def coperta_da(self, lz):
         """La lezione `lz` copre la fascia: stesso giorno e (intervallo) lo contiene tutto,
-        oppure (istante) è in corso in quel momento. Con TOLLERANZA minuti di margine, così
-        «gio 16-18» trova la lezione 16:15–18:15."""
+        oppure (istante) è in corso in quel momento, oppure (solo il giorno) è in quel giorno.
+        Con TOLLERANZA minuti di margine, così «gio 16-18» trova la lezione 16:15–18:15."""
         if lz.get("giorno") != self.giorno or not lz.get("inizio") or not lz.get("fine"):
             return False
+        if self.inizio is None:
+            return True
         a, b = _minuti(lz["inizio"]), _minuti(lz["fine"])
         if self.fine is None:
             return a - TOLLERANZA <= self.inizio < b
@@ -650,18 +654,19 @@ class Fascia:
 
 
 def leggi_fasce(testo):
-    """«gio 08:15-10:15, ven 10:15» -> [Fascia]. Giorni: lun mar mer gio ven sab (o il nome intero);
-    le ore anche senza minuti («gio 8-10»)."""
+    """«gio 08:15-10:15, ven 10:15, mar» -> [Fascia]. Giorni: lun mar mer gio ven sab (o il nome intero);
+    le ore anche senza minuti («gio 8-10»); il giorno da solo vuol dire «a qualunque ora»."""
     fasce = []
     for pezzo in re.split(r"[,;\n]+", testo or ""):
         pezzo = pezzo.strip()
         if not pezzo:
             continue
-        m = re.fullmatch(r"([a-zàèéìòù]+)\s+([\d:.h]+)\s*(?:[-–]\s*([\d:.h]+))?", pezzo.lower())
+        m = re.fullmatch(r"([a-zàèéìòù]+)(?:\s+([\d:.h]+)\s*(?:[-–]\s*([\d:.h]+))?)?", pezzo.lower())
         giorno = GIORNI_ABBR.get(m.group(1)[:3]) if m else None
         if not giorno:
-            raise ValueError(f"Fascia non valida: «{pezzo}». Scrivila come «gio 08:15-10:15» oppure «ven 10:15».")
-        inizio = _minuti(m.group(2))
+            raise ValueError(f"Fascia non valida: «{pezzo}». Scrivila come «gio 08:15-10:15», «ven 10:15» "
+                             "oppure solo «mar».")
+        inizio = _minuti(m.group(2)) if m.group(2) else None
         fine = _minuti(m.group(3)) if m.group(3) else None
         if fine is not None and fine <= inizio:
             raise ValueError(f"Fascia non valida: «{pezzo}»: la fine viene prima dell'inizio.")
@@ -1102,7 +1107,8 @@ def main(argv=None):
     p.add_argument("insegnamento", help="nome o codice, es. \"geometria e algebra lineare\" o 082747")
     p.add_argument("--fasce", default="", help="es. \"gio 08:15-10:15, ven 10:15-13:15\" (anche \"gio 8-10\": "
                    f"c'è un margine di {TOLLERANZA} minuti): un intervallo va coperto tutto da una lezione; "
-                   "un'ora sola (\"gio 08:15\") vuol dire «a lezione in quel momento»")
+                   "un'ora sola (\"gio 08:15\") vuol dire «a lezione in quel momento», il giorno da solo "
+                   "(\"mar\") «a lezione quel giorno»")
     p.add_argument("--sede", help="sede dei manifesti: MI, BV, CO, CR, LC, MN, PC")
 
     p = comando("insegnamenti", "insegnamenti con i loro docenti")
