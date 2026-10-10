@@ -161,7 +161,7 @@ Due logiche da conoscere:
 ## Le ricerche al volo (`cerca.py`)
 
 Ogni ricerca è una funzione che legge il sito **senza cache** (le ricerche devono riflettere il sito di oggi;
-unica eccezione l'elenco degli insegnamenti, sotto) e restituisce un `Risultato`: un titolo, una o più `Tabella(nome, colonne, righe)` (la prima è la principale;
+eccezioni: l'elenco degli insegnamenti e le aule, sotto) e restituisce un `Risultato`: un titolo, una o più `Tabella(nome, colonne, righe)` (la prima è la principale;
 le righe sono dict come quelle di `esporta.py`) e una lista di `note` per l'utente. `stampa()` lo scrive nel
 terminale, `salva()` su file (Excel: un foglio per tabella; gli altri formati: la tabella principale).
 I nomi leggibili delle colonne nuove sono aggiunti a `esporta.LABELS` in cima al file.
@@ -173,9 +173,13 @@ I nomi leggibili delle colonne nuove sono aggiunti a `esporta.LABELS` in cima al
 | `nomi_insegnamenti()`, `nomi_docenti()`, `suggerimenti()` | `elenco()` | le voci proposte dall'interfaccia mentre si scrive |
 | `scheda_docente()` | `RicercaPerDocentiPublic.do?evn_prodotti` (dati) e `?evn_DIDATTICA_AJAX` (insegnamenti) | per ogni insegnamento un blocco `div.tabs` con la tabella degli scaglioni; l'orario si chiede con `?evn_didattica_orario_incarico_AJAX` + il `qs` della scheda «Orario didattico», ed è la stessa griglia dei manifesti (`scarica_manifesti.parse_orario`) |
 | `chi_insegna()` | `elenco()`, `RicercaPerInsegnamentoPublic.do` (POST), `MostraFacultyPublic.do`, scheda del docente | i docenti dell'insegnamento dall'elenco, **più** quelli dell'«Elenco docenti» di ogni corso che ha l'insegnamento nel piano (`_altri_docenti()`, se l'insegnamento cercato corrisponde al massimo a `MAX_INSEGNAMENTI_COMPLETI` codici); poi la scheda di ciascuno (3 in parallelo). `Fascia.coperta_da()` confronta le lezioni con le fasce, con `TOLLERANZA` minuti di margine |
-| `aule_sede()` | sito Spazi, griglia di oggi | i nomi delle aule di una sede, per i suggerimenti |
+| `aule_della_sede()`, `aule_sede()` | sito Spazi: `RicercaAula.do` | tutte le aule di una sede (nome, categoria, tipologia, dipartimento, `idaula`), in `cache/ricerche/aule_SEDE.json` per una settimana; `aule_sede()` dà i nomi per i suggerimenti. La ricerca vuole almeno un filtro: la sede basta, «tutte» no. Accetta solo le sedi (MIA), non i singoli indirizzi (MIA01) della griglia |
+| `opzioni_aule()`, `FiltroAule`, `filtro_aule()` | menu di `RicercaAula.do` | categorie, tipologie e dipartimenti; `FiltroAule` sono i filtri della «Ricerca aula» (chiesti al sito con `_cerca_aule()`) più i posti minimi (dalle schede) |
+| `schede_aule()` | `Aula.do?evn_init=event&idaula=…` | la scheda di ogni aula: capienza, postazioni, dotazioni, software (`_leggi_scheda()`: celle `<em>voce</em><br>valore`). 4 in parallelo, in `cache/ricerche/schede_aule.json` per una settimana |
+| `elenco_aule()` | le tre sopra | le aule di una sede o di tutte, con le schede se `dettagli` |
 | `corsi_di_studio()` | `MostraIndirizziPublic.do` | i menu «scuola» e «corso di studi» (una richiesta per scuola) |
-| `occupazione_aule()` | sito Spazi: `OccupazioniGiornoEsatto.do` | serve prima una richiesta `?evn_init=event` per aprire la sessione. Una riga per aula, griglia a quarti d'ora che parte dalle 08:00: l'inizio si ricava dalle etichette delle ore (`innerOrario`, centrate sull'ora). Testo dell'occupazione: «NOME CODICE - COGNOME NOME» |
+| `occupazione_aule()` | sito Spazi: `OccupazioniGiornoEsatto.do` (tutte le aule, un giorno per richiesta) o `Aula.do` (POST `evn_occupazioni`: un'aula, un periodo intero per richiesta) | serve prima una richiesta `?evn_init=event` per aprire la sessione. Le due griglie si leggono con `_leggi_griglia()`: una riga per aula (con il link `idaula`), a quarti d'ora; l'inizio si ricava dalle etichette delle ore (`innerOrario`, centrate sull'ora); nella griglia di un'aula la prima colonna dice il giorno. Un'aula con più eventi nella stessa fascia occupa più righe (`rowspan`): le righe in più non hanno le celle data e aula. Testo dell'occupazione: «NOME CODICE - COGNOME NOME» (`_dividi_descrizione()`) |
+| `prenotazioni()` | `RicercaRichiesta.do` | cerca la frase così com'è e restituisce al massimo 500 prenotazioni: le si chiede la parola più lunga e le altre si controllano con `corrisponde()`. Ogni riga è una serie (es. «14 settembre 2026 - 23 dicembre 2026 (Lunedì)») |
 | `info_corso()` | `MostraIndirizziPublic.do`, `MostraFacultyPublic.do`, `extra/ProgrammiInterdisciplinariPublic.do`, `extra/ScambiInternazionaliPublic.do` | basta `k_corso_la`, senza scuola. Lette con il lettore generico `_blocchi_pagina()` |
 | `vecchi_ordinamenti()` | `RicercaPerInsegnamentoVOPublic.do` (POST) | |
 
@@ -189,6 +193,8 @@ parole (`G<b>E</b>OMETRIA`).
 `main()`; nell'interfaccia una voce in `RICERCHE`, un metodo `_modulo_…()` con i campi (con `_menu()`,
 `_suggerito()` o, solo per i filtri liberi, `_campo()`: mettono anche esempio e spiegazione) e la lettura dei
 campi in `SchedaCerca._prepara()`. Preferire sempre un menu o un campo con suggerimenti al testo libero.
+Per un periodo c'è `_giorno()` (calendario + «giorni di fila», letto con `_periodo()`), per scegliere le aule
+la classe `FiltriAule` (due righe di menu e caselle, letta con `filtro()`).
 `_prepara()` legge **tutti** i valori dei widget prima di avviare il thread: il thread non deve toccare tkinter.
 
 ## L'interfaccia (`interfaccia.py`)
@@ -265,5 +271,6 @@ Non ci sono test automatici. Il modo più affidabile è confrontare i risultati 
    ```
    (2026/27: in cima un docente con 2/2; una decina di docenti in tutto, letti anche dagli elenchi docenti
    di 4 corsi). Deve dare lo stesso risultato con «geometria ed algebra» e `--fasce "gio 8-10, ven 10-13"`.
-   Prova anche `docente`, `aule` (anche `--libere`), `corso` con tutte le `--mostra` e `--elenca`, il
+   Prova anche `docente`, `aule` (anche `--libere`, `--posti`, e un'aula sola per un semestre),
+   `elenco-aule`, `prenotazioni`, `corso` con tutte le `--mostra` e `--elenca`, il
    salvataggio `--out` in ogni formato, e nella scheda 3 i suggerimenti mentre si scrive.

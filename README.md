@@ -120,7 +120,9 @@ Ricerche al volo: interrogano il sito e rispondono in pochi secondi, senza file 
    | **Chi insegna un insegnamento** | i docenti, ognuno con il suo orario e il suo scaglione. Con le **fasce orarie** in cima trovi, evidenziato in verde, chi le copre tutte | *geometria e algebra lineare*, sede Milano Leonardo, fasce gio 08:15–10:15 e ven 10:15–13:15 → il docente che le copre entrambe, con il suo scaglione |
    | **Scheda di un docente** | insegnamenti, scaglioni, orario delle lezioni, contatti | *rossi*, poi scegli il docente dall'elenco |
    | **Insegnamenti e docenti** | chi insegna cosa, per insegnamento o per docente | *analisi matematica 1*, sede Milano Leonardo |
-   | **Aule** | chi occupa ogni aula, ora per ora (insegnamento e docente), oppure le **aule libere** in una fascia oraria | Milano Città Studi, 15/10/2026, libere dalle 10:15 alle 12:15 |
+   | **Aule** | chi occupa ogni aula, ora per ora (insegnamento e docente), oppure le **aule libere** in una fascia oraria; anche solo le aule di un certo tipo, con certe dotazioni o con abbastanza posti. Per un'aula sola fino a 120 giorni (un semestre) | Milano Città Studi, 15/10/2026, libere dalle 10:15 alle 12:15 con almeno 100 posti |
+   | **Elenco delle aule** | le aule di una sede (o di tutte) con capienza, postazioni, dotazioni (proiettore, prese…) e software installato | Milano Bovisa, tipologia *Informatizzata* |
+   | **Prenotazioni delle aule** | in tutte le sedi, le prenotazioni (lezioni, esami, eventi) che contengono certe parole, con giorno, ora, sede, aula e periodo | *rossi*, dal 12/10/2026 per 7 giorni |
    | **Informazioni su un corso** | piani di studio, elenco dei docenti, programmi interdisciplinari, scambi internazionali | scuola Ing. Ind-Inf, corso *Ingegneria Informatica (531)* |
    | **Vecchi ordinamenti** | insegnamenti precedenti al D.M. 509 | *geometria* |
 
@@ -136,7 +138,11 @@ Ricerche al volo: interrogano il sito e rispondono in pochi secondi, senza file 
      «a lezione in quel momento»; con *dalle* «tutto il giorno» basta che abbia lezione quel giorno.
    - **Gli orari non devono essere precisi al quarto d'ora**: c'è un margine di 15 minuti, quindi «dalle 16
      alle 18» trova anche la lezione 16:15–18:15.
-   - **Giorno** delle aule: dal calendario (📅), oppure *Oggi* / *Domani*; *Quanti giorni* da un menu.
+   - **Giorni**: il primo dal calendario (📅), oppure *Oggi* / *Domani*; quanti giorni di fila da un menu.
+   - **Quali aule**: categoria, tipologia, dipartimento e posti minimi dai menu, dotazioni (prese elettriche,
+     prese di rete, didattica innovativa) con le caselle: gli stessi filtri della «Ricerca aula» del sito Spazi.
+     Capienza e dotazioni vengono dalla scheda di ogni aula: la prima volta il programma le legge tutte (mezzo
+     minuto o poco più per sede), poi le ricorda per una settimana.
    - **Corso di studi**: prima la scuola, poi il corso dal menu.
 3. **Risultati**: alcune ricerche danno più tabelle (per esempio *Docenti* e *Orario dei docenti*): scegli
    quale vedere sopra la tabella. Doppio clic su una riga per vederla per intero; da lì, o con i pulsanti sotto
@@ -189,7 +195,13 @@ python cerca.py docente rossi                 # più docenti: elenco con i codic
 python cerca.py aule --sede MIA --giorno 15/10/2026 --cerca geometria
 python cerca.py aule --sede MIA --giorno 15/10/2026 --aula T.2.2 --al 16/10/2026
 python cerca.py aule --sede MIA --giorno 15/10/2026 --libere --dalle 10:15 --alle 12:15
+python cerca.py aule --sede MIA --giorno 15/10/2026 --libere --dalle 14 --alle 16 --posti 100 --categoria didattica
+python cerca.py aule --sede MIA --aula T.2.2 --giorno 14/09/2026 --al 23/12/2026   # un'aula: tutto il semestre
 python cerca.py aule --elenca-sedi            # codici delle sedi per le aule (MIA = Milano Città Studi…)
+python cerca.py elenco-aule --sede MIB --tipologia informatizzata   # capienza, dotazioni, software
+python cerca.py elenco-aule --out output/ricerche/aule.xlsx         # tutte le aule di tutte le sedi
+python cerca.py elenco-aule --elenca-filtri   # valori di --categoria, --tipologia, --dipartimento
+python cerca.py prenotazioni rossi --dal 12/10/2026 --al 18/10/2026
 python cerca.py corso --elenca --scuola 225   # scuole e corsi con i loro codici
 python cerca.py corso 531 --mostra docenti    # struttura | docenti | interdisciplinari | scambi
 python cerca.py vecchi-ordinamenti --insegnamento geometria
@@ -201,7 +213,10 @@ Ogni script mostra le opzioni disponibili con `--help` (anche `python cerca.py c
 
 ## Note
 - Gli orari di inizio e fine vengono ricavati dalla griglia a quarti d'ora del sito.
-- L'elenco di tutti gli insegnamenti usato dalla scheda 3 resta in `cache/ricerche/` per 12 ore.
+- L'elenco di tutti gli insegnamenti usato dalla scheda 3 resta in `cache/ricerche/` per 12 ore; l'elenco
+  delle aule e le schede delle aule per una settimana.
+- La ricerca delle prenotazioni del sito restituisce al massimo 500 risultati: se il limite viene raggiunto il
+  programma lo dice; basta restringere il periodo o scrivere parole più precise.
 - Alcuni insegnamenti non hanno orario: il sito indica "Non esistono occupazioni" oppure l'insegnamento
   è erogato da un ateneo partner.
 - Il programma aspetta un attimo tra una richiesta e l'altra per non sovraccaricare il sito e ne fa al

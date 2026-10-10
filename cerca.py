@@ -12,7 +12,9 @@ LE RICERCHE E LE PAGINE DEL SITO CHE USANO
     scheda_docente(codice o nome)   dati, insegnamenti, scaglioni e orario   scheda del docente
     chi_insegna(insegnamento, fasce) i docenti di un insegnamento con il loro orario, ordinati
                                     per quante fasce orarie richieste coprono    (*) + scheda del docente
-    occupazione_aule(giorno, …)     chi occupa ogni aula e quando; aule libere   sito «Spazi»
+    occupazione_aule(giorno, …)     chi occupa ogni aula e quando; aule libere   sito «Spazi» (**)
+    elenco_aule(sede, …)            le aule con capienza, postazioni, dotazioni   sito «Spazi» (**)
+    prenotazioni(testo, dal, al)    le prenotazioni delle aule per docente o evento, in tutte le sedi
     info_corso(corso, pagina)       struttura, elenco docenti, programmi interdisciplinari, scambi
     vecchi_ordinamenti(…)           insegnamenti degli ordinamenti precedenti al D.M. 509
 
@@ -22,6 +24,12 @@ LE RICERCHE E LE PAGINE DEL SITO CHE USANO
         Cercando «%%%» la pagina restituisce l'elenco completo dell'anno: elenco() lo scarica una
         volta (15-20 secondi), lo tiene su disco per qualche ora e le ricerche lo filtrano in locale,
         tollerando parole come «e», «ed», «di» e gli accenti (corrisponde()).
+
+    (**) Il sito Spazi ha una griglia per sede e giorno (OccupazioniGiornoEsatto), una per aula e
+        periodo (Aula.do, anche mesi in una richiesta), la «Ricerca aula» con i filtri per categoria,
+        tipologia, dipartimento e dotazioni (RicercaAula), la scheda di ogni aula (Aula.do?idaula=…)
+        e la «Ricerca prenotazioni» (RicercaRichiesta, al massimo 500 risultati). L'elenco delle aule
+        e le loro schede si tengono su disco per una settimana: cambiano di rado.
 
 ORARI APPROSSIMATIVI
     Le lezioni iniziano e finiscono al quarto d'ora (08:15, 10:15…). Ovunque si confrontano orari
@@ -40,6 +48,10 @@ Uso da terminale, esempi:
     python cerca.py docente rossi
     python cerca.py aule --sede MIA --giorno 15/10/2026 --cerca geometria
     python cerca.py aule --sede MIA --giorno 15/10/2026 --libere --dalle 10:15 --alle 12:15
+    python cerca.py aule --sede MIA --giorno 15/10/2026 --libere --dalle 14 --alle 16 --posti 100
+    python cerca.py aule --sede MIA --aula T.2.2 --giorno 14/09/2026 --al 23/12/2026
+    python cerca.py elenco-aule --sede MIB --tipologia informatizzata --out aule.xlsx
+    python cerca.py prenotazioni rossi --dal 12/10/2026 --al 18/10/2026
     python cerca.py corso --elenca
     python cerca.py corso 531 --mostra docenti
     python cerca.py vecchi-ordinamenti --insegnamento geometria
@@ -70,7 +82,11 @@ URL_DOCENTI = CONTROLLER + "ricerche/RicercaPerDocentiPublic.do"
 URL_INS_DOCENTI = CONTROLLER + "ricerche/RicercaInsegnamentiErogatiInLinguaInglesePublic.do"
 URL_VO = CONTROLLER + "ricerche/RicercaPerInsegnamentoVOPublic.do"
 URL_PER_INSEGNAMENTO = CONTROLLER + "ricerche/RicercaPerInsegnamentoPublic.do"
-URL_SPAZI = sm.HOST + "/spazi/spazi/controller/OccupazioniGiornoEsatto.do"
+SPAZI = sm.HOST + "/spazi/spazi/controller/"
+URL_SPAZI = SPAZI + "OccupazioniGiornoEsatto.do"
+URL_RICERCA_AULA = SPAZI + "RicercaAula.do"
+URL_AULA = SPAZI + "Aula.do"
+URL_PRENOTAZIONI = SPAZI + "RicercaRichiesta.do"
 
 PAGINE_CORSO = {  # chiave: (nome per l'utente, pagina del sito)
     "struttura": ("Struttura del corso", CONTROLLER + "MostraIndirizziPublic.do"),
@@ -82,7 +98,9 @@ PAGINE_CORSO = {  # chiave: (nome per l'utente, pagina del sito)
 GIORNI_ABBR = {g[:3].lower(): g for g in sm.GIORNI}          # "gio" -> "Giovedì"
 GIORNI_SPAZI = {"Lun": "Lunedì", "Mar": "Martedì", "Mer": "Mercoledì", "Gio": "Giovedì",
                 "Ven": "Venerdì", "Sab": "Sabato", "Dom": "Domenica"}
-MAX_GIORNI_AULE = 14
+MAX_GIORNI_AULE = 14                                 # tutte le aule di una sede: una richiesta per giorno
+MAX_GIORNI_AULA = 120                                # una sola aula: un periodo intero in una richiesta
+MAX_GIORNI_PRENOTAZIONI = 366
 MAX_INSEGNAMENTI_COMPLETI = 3                        # chi_insegna: oltre, niente elenchi docenti dei corsi
 TOLLERANZA = 15                                      # minuti, vedi «ORARI APPROSSIMATIVI»
 ORE_LEZIONE = [f"{h:02d}:15" for h in range(8, 21)]  # 08:15 … 20:15, per i menu dell'interfaccia
@@ -94,6 +112,11 @@ ex.LABELS.update({
     "insegnamenti": "Insegnamenti", "track": "Track (piano)", "voce": "Voce", "valore": "Valore",
     "corrispondenze": "Fasce coperte", "fasce": "Quali fasce", "data": "Data",
     "descrizione": "Descrizione sul sito", "libera": "Libera", "gruppo": "Gruppo", "paese": "Paese",
+    "categoria": "Categoria", "tipologia": "Tipologia", "dipartimento": "Dipartimento", "dove": "Dove",
+    "capienza": "Capienza", "postazioni": "Postazioni", "tipo_postazioni": "Tipo postazioni",
+    "posti_disabili": "Posti per disabili", "dotazioni": "Dotazioni", "software": "Software",
+    "edificio_aula": "Edificio", "indirizzo": "Indirizzo", "denominazione": "Denominazione",
+    "codice_vano": "Codice vano", "url_aula": "Scheda aula", "id_aula": "Id aula",
 })
 
 
@@ -222,6 +245,23 @@ def scelte(log=None):
         _scelte["sedi_aule"] = [(o["valore"], o["testo"]) for o in sm.select_options(pg, "csic")
                                 if o["valore"] != "tutte"]
     return _scelte
+
+
+_opzioni_aule = {}
+
+
+def opzioni_aule(log=None):
+    """I valori dei filtri della «Ricerca aula» del sito Spazi: {"categorie", "tipologie", "dipartimenti"},
+    ognuno [(codice, nome)]."""
+    if not _opzioni_aule:
+        pg = soup(_cli(log).get(URL_SPAZI, {"evn_ricerca_aula": "evento", "jaf_currentWFID": "main"}))
+        p = "spazi___model___formbean___RicercaAvanzataAuleVO___"
+        _opzioni_aule.update({
+            chiave: [(o["valore"], o["testo"]) for o in sm.select_options(pg, p + campo)
+                     if o["valore"] not in ("tutte", "tutti")]
+            for chiave, campo in (("categorie", "categoriaScelta"), ("tipologie", "tipologiaScelta"),
+                                  ("dipartimenti", "iddipScelto"))})
+    return _opzioni_aule
 
 
 def _aa(aa):
@@ -807,7 +847,7 @@ def chi_insegna(insegnamento, fasce="", aa=None, sede=None, log=None, stop=None,
                                        "dal", "al", "edificio", "attivita"], lezioni)], note)
 
 
-# ============================================================ occupazione aule (sito Spazi)
+# ============================================================ aule (sito Spazi)
 
 def _data(testo):
     try:
@@ -816,52 +856,118 @@ def _data(testo):
         raise ValueError(f"Data non valida: «{testo}». Scrivila come 15/10/2026.")
 
 
-def _occupazioni_giorno(cli, giorno, sede):
-    """Tutte le righe aula/fascia di un giorno: (righe occupate, {aula: edificio})."""
-    cli.get(URL_SPAZI, {"evn_init": "event", "jaf_currentWFID": "main"})  # apre la sessione
-    page = soup(cli.get(URL_SPAZI, {
-        "csic": sede, "categoria": "tutte", "tipologia": "tutte", "giorno_day": giorno.day,
-        "giorno_month": giorno.month, "giorno_year": giorno.year, "jaf_giorno_date_format": "dd/MM/yyyy",
-        "evn_visualizza": "", "jaf_currentWFID": "main"}))
+def _giorni(giorno, al, massimo, consiglio=""):
+    """(primo, ultimo) giorno da date o testi «gg/mm/aaaa», controllati."""
+    g1 = _data(giorno) if isinstance(giorno, str) else giorno
+    g2 = (_data(al) if isinstance(al, str) else al) if al else g1
+    if g2 < g1:
+        raise ValueError("La data finale viene prima di quella iniziale.")
+    if (g2 - g1).days >= massimo:
+        raise ValueError(f"Al massimo {massimo} giorni per volta.{consiglio}")
+    return g1, g2
+
+
+def _quando(g1, g2):
+    return g1.strftime("%d/%m/%Y") + (f" – {g2.strftime('%d/%m/%Y')}" if g2 != g1 else "")
+
+
+def _campi_data(prefisso, giorno):
+    """I tre menu giorno/mese/anno con cui il sito Spazi chiede una data."""
+    return {prefisso + "_day": giorno.day, prefisso + "_month": giorno.month, prefisso + "_year": giorno.year,
+            "jaf_" + prefisso + "_date_format": "dd/MM/yyyy"}
+
+
+def url_aula(id_aula):
+    return f"{URL_AULA}?evn_init=event&idaula={id_aula}&jaf_currentWFID=main"
+
+
+def _id_aula(href):
+    m = re.search(r"idaula=(\d+)", href or "")
+    return m.group(1) if m else None
+
+
+def _dividi_descrizione(descr):
+    """«GEOMETRIA E ALGEBRA LINEARE 082747 - ROSSI MARIO» -> (insegnamento, codice, docente).
+    Le occupazioni che non sono lezioni (esami, convegni…) restano intere nell'insegnamento."""
+    m = re.match(r"^(.*?)\s+(\d{6})\s*-?\s*(.*)$", descr)
+    return (m.group(1), m.group(2), _nome_proprio(m.group(3)) or None) if m else (descr, None, None)
+
+
+# ------------------------------------------------------------ griglia delle occupazioni
+
+def _leggi_griglia(page, giorno=None):
+    """Le occupazioni di una griglia del sito Spazi: quella di una sede in un giorno, o quella di un'aula
+    in un periodo (lì la prima colonna dice il giorno). Restituisce (righe occupate,
+    {id aula: {"aula", "edificio"}}). Un'aula con più eventi nella stessa fascia occupa più righe
+    della griglia (rowspan): le righe in più continuano l'aula precedente."""
     righe, aule, edificio, inizio_griglia = [], {}, None, 8 * 60
+    aula = id_aula = None
+    rimaste = 0  # righe della griglia che appartengono ancora all'ultima aula
     for tr in page.find_all("tr"):
         tds = tr.find_all("td", recursive=False)
         if not tds:
             continue
-        if "innerEdificio" in (tds[0].get("class") or []):
+        classi = [td.get("class") or [] for td in tds]
+        if "innerEdificio" in classi[0]:
             edificio = txt(tds[0])
             continue
-        if any("innerOrario" in (td.get("class") or []) for td in tds):
+        if any("innerOrario" in c for c in classi):
             # le ore sono centrate sul loro istante: «09:00» copre da 08:30 a 09:30
             col = 0
-            for td in tds:
+            for td, c in zip(tds, classi):
                 span = int(td.get("colspan", 1) or 1)
-                if "innerOrario" in (td.get("class") or []):
+                if "innerOrario" in c:
                     if re.fullmatch(r"\d{2}:\d{2}", txt(td)):
-                        inizio_griglia = _minuti(txt(td)) - (col + span / 2) * 15
+                        inizio_griglia = int(_minuti(txt(td)) - (col + span / 2) * 15)
                         break
                     col += span
-            inizio_griglia = int(inizio_griglia)
             continue
-        if len(tds) < 3 or "data" not in (tds[0].get("class") or []) or "dove" not in (tds[1].get("class") or []):
+        if len(tds) >= 3 and "data" in classi[0] and "dove" in classi[1]:
+            m = re.search(r"\d{2}/\d{2}/\d{4}", txt(tds[0]))
+            giorno = _data(m.group()) if m else giorno
+            a = tds[1].find("a")
+            aula, id_aula = txt(tds[1]), _id_aula(a.get("href") if a else None) or txt(tds[1])
+            luogo = (a.get("title") if a else None) or edificio
+            aule[id_aula] = {"aula": aula, "edificio": luogo}
+            rimaste = int(tds[1].get("rowspan", 1) or 1) - 1
+            celle = tds[2:]
+        elif rimaste > 0 and any(("slot" in c or any(x.startswith("empty") for x in c)) for c in classi):
+            rimaste -= 1
+            celle = tds
+        else:
             continue
-        a = tds[1].find("a")
-        aula = txt(tds[1])
-        aule[aula] = (a.get("title") if a else None) or edificio
         t = inizio_griglia
-        for td in tds[2:]:
+        for td in celle:
             span = int(td.get("colspan", 1) or 1)
             if "slot" in (td.get("class") or []):
                 descr = re.sub(r"\s+", " ", txt(td))
-                m = re.match(r"^(.*?)\s+(\d{6})\s*-?\s*(.*)$", descr)
+                insegnamento, codice, docente = _dividi_descrizione(descr)
                 righe.append({
                     "data": giorno.strftime("%d/%m/%Y"), "giorno": sm.GIORNI[giorno.weekday()],
                     "aula": aula, "inizio": _hhmm(t), "fine": _hhmm(t + 15 * span),
-                    "insegnamento": m.group(1) if m else descr, "codice": m.group(2) if m else None,
-                    "docente": _nome_proprio(m.group(3)) if m else None,
-                    "edificio": aule[aula], "descrizione": descr})
+                    "insegnamento": insegnamento, "codice": codice, "docente": docente,
+                    "edificio": aule[id_aula]["edificio"], "descrizione": descr,
+                    "id_aula": id_aula, "url_aula": url_aula(id_aula)})
             t += 15 * span
     return righe, aule
+
+
+def _griglia_sede(cli, giorno, sede):
+    """La griglia di tutte le aule di una sede in un giorno."""
+    cli.get(URL_SPAZI, {"evn_init": "event", "jaf_currentWFID": "main"})  # apre la sessione
+    return _leggi_griglia(soup(cli.get(URL_SPAZI, {
+        "csic": sede, "categoria": "tutte", "tipologia": "tutte", **_campi_data("giorno", giorno),
+        "evn_visualizza": "", "jaf_currentWFID": "main"})), giorno)
+
+
+def _griglia_aula(cli, id_aula, dal, al):
+    """La griglia di un'aula per un periodo intero: una sola richiesta, anche per mesi."""
+    cli.get(URL_AULA, {"evn_init": "event", "idaula": id_aula, "jaf_currentWFID": "main"})  # apre la sessione
+    p = "spazi___model___formbean___DateOccupazForm___"
+    return _leggi_griglia(soup(cli.post(URL_AULA + "?jaf_currentWFID=main", {
+        p + "postBack": "true", p + "formMode": "FILTER", "idaula": id_aula,
+        **_campi_data(p + "fromData", dal), **_campi_data(p + "toData", al),
+        "evn_occupazioni": "Visualizza occupazioni"})))
 
 
 def _intervalli_liberi(occupati, da, a):
@@ -878,30 +984,257 @@ def _intervalli_liberi(occupati, da, a):
     return [(x, y) for x, y in liberi if y > x]
 
 
-_aule = {}  # sede -> nomi delle aule
+# ------------------------------------------------------------ elenco delle aule e loro schede
+
+@dataclass
+class FiltroAule:
+    """Quali aule: gli stessi filtri della «Ricerca aula» del sito Spazi, più i posti minimi.
+    I codici di categoria, tipologia e dipartimento sono quelli di opzioni_aule()."""
+    categoria: str = None            # es. "D" = AULA DIDATTICA
+    tipologia: str = None            # es. "N" = INFORMATIZZATA
+    dipartimento: str = None         # es. "781" = DIPARTIMENTO DI MATEMATICA
+    prese_elettriche: bool = False   # postazioni con presa elettrica
+    prese_rete: bool = False         # postazioni con presa di rete
+    innovativa: bool = False         # allestimento per didattica innovativa
+    posti: int = None                # capienza minima: serve la scheda di ogni aula
+
+    def del_sito(self):
+        """Vero se qualche filtro va chiesto al sito (tutti tranne i posti)."""
+        return bool(self.categoria or self.tipologia or self.dipartimento or self.prese_elettriche
+                    or self.prese_rete or self.innovativa)
+
+    def __bool__(self):
+        return self.del_sito() or bool(self.posti)
+
+    def __str__(self):
+        op = opzioni_aule()
+        nomi = [dict(op[k]).get(v, v) for k, v in (("categorie", self.categoria), ("tipologie", self.tipologia),
+                                                   ("dipartimenti", self.dipartimento)) if v]
+        nomi += [n for n, si in (("prese elettriche", self.prese_elettriche), ("prese di rete", self.prese_rete),
+                                 ("didattica innovativa", self.innovativa)) if si]
+        if self.posti:
+            nomi.append(f"almeno {self.posti} posti")
+        return ", ".join(n.lower() for n in nomi)
 
 
-def aule_sede(sede, log=None, stop=None):
-    """I nomi delle aule di una sede del sito Spazi (dalla griglia di oggi), in ordine naturale."""
+def filtro_aule(categoria=None, tipologia=None, dipartimento=None, prese_elettriche=False, prese_rete=False,
+                innovativa=False, posti=None):
+    """Un FiltroAule da codici o nomi scritti a mano: «didattica», «informatizzata», «matematica»."""
+    op = opzioni_aule()
+
+    def codice(chiave, testo):
+        if not testo:
+            return None
+        voci = op[chiave]
+        trovate = [c for c, n in voci if c.lower() == testo.strip().lower()] or                   [c for c, n in voci if corrisponde(testo, n)]
+        if len(trovate) != 1:
+            elenco = "; ".join(f"{c} = {n}" for c, n in voci)
+            raise ValueError(f"«{testo}» {'non corrisponde a nessuna' if not trovate else 'corrisponde a più'} "
+                             f"delle {chiave}: {elenco}")
+        return trovate[0]
+    return FiltroAule(codice("categorie", categoria), codice("tipologie", tipologia),
+                      codice("dipartimenti", dipartimento), prese_elettriche, prese_rete, innovativa, posti)
+
+
+VALIDITA_AULE = 7 * 24 * 3600      # secondi: le aule e le loro schede cambiano molto di rado
+SCHEDE_PARALLELE = 4
+_aule = {}                         # sede -> righe dell'elenco delle aule (senza filtri)
+_schede = {}                       # id aula -> scheda (dict)
+_schede_lock = threading.Lock()
+
+
+def _cerca_aule(cli, sede, filtro=None):
+    """Le aule di una sede (codice Spazi) dalla «Ricerca aula» del sito, con i suoi filtri."""
+    f = filtro or FiltroAule()
+    p = "spazi___model___formbean___RicercaAvanzataAuleVO___"
+    richiesta = {p + "postBack": "true", p + "formMode": "FILTER", p + "sede": sede, p + "sigla": "",
+                 p + "categoriaScelta": f.categoria or "tutte", p + "tipologiaScelta": f.tipologia or "tutte",
+                 p + "iddipScelto": f.dipartimento or "tutti", "evn_ricerca_avanzata": "Ricerca aula",
+                 "jaf_currentWFID": "main"}
+    for campo, si in (("soloPreseElettriche", f.prese_elettriche), ("soloPreseDiRete", f.prese_rete),
+                      ("soloAllDidInnovativa", f.innovativa)):
+        richiesta[p + campo + "_default"] = "N"
+        if si:
+            richiesta[p + campo] = "S"
+    page = soup(cli.get(URL_RICERCA_AULA, richiesta))
+    tabella = page.find("table", id="aule")
+    out = []
+    for tr in (tabella.find_all("tr") if tabella else [])[1:]:
+        tds = tr.find_all("td", recursive=False)
+        a = tr.find("a", href=re.compile("idaula="))
+        if len(tds) < 6 or not a:
+            continue
+        dip = txt(tds[5])
+        out.append({"aula": txt(tds[1]), "dove": txt(tds[0]), "categoria": txt(tds[3]),
+                    "tipologia": txt(tds[4]), "dipartimento": None if dip == "-" else dip,
+                    "id_aula": _id_aula(a["href"]), "url_aula": url_aula(_id_aula(a["href"]))})
+    return out
+
+
+def _leggi_json(f, validita):
+    try:
+        if time.time() - f.stat().st_mtime < validita:
+            return json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _scrivi_json(f, dati):
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(dati, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, f)  # scrittura atomica: mai un file a metà
+
+
+def _ordine_naturale(nome):
+    return [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", nome)]
+
+
+def aule_della_sede(sede, log=None, stop=None):
+    """Tutte le aule di una sede del sito Spazi (righe di _cerca_aule), in memoria e su disco.
+    Per un singolo indirizzo (es. MIA01) le aule di tutta la sede: la ricerca del sito non li distingue."""
+    sede = sede[:3]
     if sede not in _aule:
-        _, aule = _occupazioni_giorno(_cli(log, stop), date.today(), sede)
-        _aule[sede] = sorted(aule, key=lambda a: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", a)])
+        f = CARTELLA_ELENCHI / f"aule_{sede}.json"
+        righe = _leggi_json(f, VALIDITA_AULE)
+        if righe is None:
+            righe = _cerca_aule(_cli(log, stop), sede)
+            if righe:
+                _scrivi_json(f, righe)
+        _aule[sede] = sorted(righe, key=lambda r: _ordine_naturale(r["aula"]))
     return _aule[sede]
 
 
+def aule_sede(sede, log=None, stop=None):
+    """I nomi delle aule di una sede, in ordine naturale (per i suggerimenti)."""
+    return list(dict.fromkeys(r["aula"] for r in aule_della_sede(sede, log, stop)))
+
+
+# le voci della scheda di un'aula che finiscono nelle tabelle: etichetta sul sito -> colonna
+VOCI_SCHEDA = {"Capienza": "capienza", "Numero postazioni": "postazioni", "Tipo postazioni": "tipo_postazioni",
+               "Postazioni per studenti disabili": "posti_disabili", "Edificio": "edificio_aula",
+               "Indirizzo": "indirizzo", "Codice vano": "codice_vano", "Denominazione": "denominazione"}
+
+
+def _leggi_scheda(page):
+    scheda = {}
+    for td in page.select("table.BoxInfoCard td"):
+        em = td.find("em")
+        if not em or td.find("table"):
+            continue
+        voce = txt(em)
+        valore = re.sub(r"\s+", " ", td.get_text(" ", strip=True)[len(em.get_text(" ", strip=True)):]).strip()
+        if voce in VOCI_SCHEDA and VOCI_SCHEDA[voce] not in scheda:  # «Edificio» torna nelle indicazioni
+            scheda[VOCI_SCHEDA[voce]] = valore if valore not in ("", "-") else None
+    for k in ("capienza", "postazioni", "posti_disabili"):
+        scheda[k] = int(scheda[k]) if str(scheda.get(k) or "").isdigit() else None
+    dotazioni = []
+    tabella = page.find("table", id="aula_xproprietaPubblicabili_auleColl")
+    for tr in (tabella.find_all("tr") if tabella else []):
+        tds = [txt(td) for td in tr.find_all("td", recursive=False)]
+        if len(tds) == 3 and tds[2]:
+            dotazioni.append(tds[1] if tds[2].upper() == "SI" else f"{tds[1]}: {tds[2]}")
+    scheda["dotazioni"] = ", ".join(dotazioni) or None
+    tabella = page.find("table", id="sw_installato")
+    software = [txt(td) for td in (tabella.find_all("td") if tabella else [])
+                if "MsgEmptyClass" not in (td.get("class") or []) and txt(td)]
+    scheda["software"] = ", ".join(software) or None
+    return scheda
+
+
+def schede_aule(ids, log=None, stop=None, avanzamento=None):
+    """{id aula: scheda} (capienza, postazioni, dotazioni, software…), su disco per qualche giorno:
+    la prima volta si legge una pagina per aula, qualche aula in parallelo."""
+    avanzamento = avanzamento or (lambda fatti, totale: None)
+    f = CARTELLA_ELENCHI / "schede_aule.json"
+    with _schede_lock:
+        if not _schede:
+            _schede.update(_leggi_json(f, float("inf")) or {})
+        adesso = time.time()
+        mancanti = [i for i in dict.fromkeys(ids)
+                    if adesso - (_schede.get(i) or {}).get("_letta", 0) > VALIDITA_AULE]
+        if mancanti:
+            cli = _cli(log, stop, delay=0.15)
+            fatte = 0
+            for _, i, scheda, err in sm.in_parallelo(
+                    lambda i: _leggi_scheda(soup(cli.get(URL_AULA, {"evn_init": "event", "idaula": i,
+                                                                    "jaf_currentWFID": "main"}))),
+                    mancanti, SCHEDE_PARALLELE):
+                fatte += 1
+                avanzamento(fatte, len(mancanti))
+                if err:
+                    (log or (lambda m: None))(f"Scheda dell'aula {i} non letta: {err}")
+                else:
+                    _schede[i] = {**scheda, "_letta": adesso}
+                if fatte % 50 == 0 or fatte == len(mancanti):
+                    _scrivi_json(f, _schede)  # anche a metà: se si interrompe, il lavoro fatto resta
+        return {i: _schede[i] for i in ids if i in _schede}
+
+
+def _aule_scelte(sede, filtro, log=None, stop=None, avanzamento=None):
+    """Le aule di una sede che rispettano il filtro: (righe dell'elenco, {id: scheda} se servite)."""
+    aule = aule_della_sede(sede, log, stop)
+    if filtro and filtro.del_sito():
+        buone = {r["id_aula"] for r in _cerca_aule(_cli(log, stop), sede[:3], filtro)}
+        aule = [r for r in aule if r["id_aula"] in buone]
+    schede = {}
+    if filtro and filtro.posti:
+        schede = schede_aule([r["id_aula"] for r in aule], log, stop, avanzamento)
+        aule = [r for r in aule if ((schede.get(r["id_aula"]) or {}).get("capienza") or 0) >= filtro.posti]
+    return aule, schede
+
+
+def elenco_aule(sede=None, aula=None, filtro=None, dettagli=True, log=None, stop=None, avanzamento=None):
+    """Le aule di una sede (o di tutte) con categoria, tipologia e dipartimento; con `dettagli` anche
+    capienza, postazioni, dotazioni e software dalla scheda di ogni aula. `aula`: parte del nome."""
+    sedi = [sede] if sede else [s for s, _ in scelte(log)["sedi_aule"] if len(s) == 3]  # le sedi, non gli indirizzi
+    nomi_sedi = dict(scelte()["sedi_aule"])
+    righe = []
+    for s in sedi:
+        trovate, schede = _aule_scelte(s, filtro, log, stop, avanzamento)
+        righe += [{"sede": nomi_sedi.get(s, s), **r} for r in trovate
+                  if not aula or r["aula"].lower().startswith(aula.strip().lower()) or corrisponde(aula, r["aula"])]
+    colonne = ["sede", "aula", "categoria", "tipologia", "dipartimento", "dove"]
+    dettagli = dettagli or bool(filtro and filtro.posti)
+    if dettagli and righe:
+        schede = schede_aule([r["id_aula"] for r in righe], log, stop, avanzamento)
+        for r in righe:
+            r.update({k: v for k, v in (schede.get(r["id_aula"]) or {}).items() if not k.startswith("_")})
+        colonne = ["sede", "aula", "capienza", "postazioni", "categoria", "tipologia", "tipo_postazioni",
+                   "posti_disabili", "dotazioni", "software", "dipartimento", "edificio_aula", "indirizzo",
+                   "denominazione", "codice_vano"]
+    if sede:
+        colonne.remove("sede")
+    titolo = "Aule – " + (nomi_sedi.get(sede, sede) if sede else "tutte le sedi") + (f" – {filtro}" if filtro else "")
+    ris = Risultato(titolo, [Tabella("Aule", colonne + ["url_aula"], righe)])
+    if not righe:
+        ris.note.append("Nessuna aula con queste caratteristiche.")
+    elif dettagli:
+        ris.note.append("Capienza, dotazioni e software vengono dalla scheda di ogni aula sul sito Spazi.")
+    return ris
+
+
+def _ids_per_nome(sede, aula, log=None, stop=None):
+    """Gli id delle aule di una sede con questo nome (a volte più aule si chiamano allo stesso modo)."""
+    ids = [r["id_aula"] for r in aule_della_sede(sede, log, stop) if r["aula"].lower() == aula.strip().lower()]
+    if not ids:
+        raise ValueError(f"Nella sede scelta non c'è un'aula «{aula}».")
+    return ids
+
+
+# ------------------------------------------------------------ occupazione e aule libere
+
 def occupazione_aule(giorno, al=None, sede=None, aula=None, testo=None, dalle=None, alle=None, libere=False,
-                     log=None, stop=None, avanzamento=None):
+                     filtro=None, log=None, stop=None, avanzamento=None):
     """Chi occupa le aule di una sede, giorno per giorno (dal sito Spazi). Filtri: `aula` (es. T.2.2),
-    `testo` (parole nella descrizione: insegnamento, codice o docente), `dalle`/`alle` (ore).
-    Con libere=True elenca invece le aule libere (tra `dalle` e `alle`, altrimenti 08:00–20:00)."""
+    `testo` (parole nella descrizione: insegnamento, codice o docente), `dalle`/`alle` (ore), `filtro`
+    (FiltroAule: categoria, posti…). Con libere=True elenca invece le aule libere (tra `dalle` e `alle`,
+    altrimenti 08:00–20:00). Per una sola aula si può chiedere un periodo lungo (MAX_GIORNI_AULA)."""
     if not sede:
         raise ValueError("Scegli la sede (es. MIA = Milano Città Studi, MIB = Milano Bovisa).")
-    g1 = _data(giorno) if isinstance(giorno, str) else giorno
-    g2 = (_data(al) if isinstance(al, str) else al) if al else g1
-    if g2 < g1:
-        raise ValueError("La data finale viene prima di quella iniziale.")
-    if (g2 - g1).days >= MAX_GIORNI_AULE:
-        raise ValueError(f"Al massimo {MAX_GIORNI_AULE} giorni per volta.")
+    g1, g2 = _giorni(giorno, al, MAX_GIORNI_AULA if aula else MAX_GIORNI_AULE,
+                     "" if aula else f" Per un'aula sola si arriva a {MAX_GIORNI_AULA} giorni.")
     da_min = _minuti(dalle) if dalle else None
     a_min = _minuti(alle) if alle else None
     if da_min is not None and a_min is not None and a_min <= da_min:
@@ -909,48 +1242,134 @@ def occupazione_aule(giorno, al=None, sede=None, aula=None, testo=None, dalle=No
     avanzamento = avanzamento or (lambda fatti, totale: None)
     cli = _cli(log, stop)
     giorni = [g1 + timedelta(days=k) for k in range((g2 - g1).days + 1)]
+    schede, ammesse = {}, None
+    if filtro:
+        aule, schede = _aule_scelte(sede, filtro, log, stop, avanzamento)  # con i posti: le schede delle aule
+        ammesse = {r["id_aula"] for r in aule}
+
+    # le occupazioni: per un'aula sola la sua pagina (un periodo intero per richiesta), altrimenti
+    # la griglia della sede giorno per giorno
+    griglie = []  # (giorno o None, righe, aule)
+    if aula:
+        ids = _ids_per_nome(sede, aula, log, stop)
+        for n, i in enumerate(ids, 1):
+            righe, aule = _griglia_aula(cli, i, g1, g2)
+            aule.setdefault(i, {"aula": aula.strip(), "edificio": None})  # un'aula senza occupazioni è libera
+            griglie.append((None, righe, aule))
+            avanzamento(n, len(ids))
+    else:
+        for n, g in enumerate(giorni, 1):
+            griglie.append((g, *_griglia_sede(cli, g, sede)))
+            avanzamento(n, len(giorni))
+
     occupate, liberi = [], []
-    for n, g in enumerate(giorni, 1):
-        righe, aule = _occupazioni_giorno(cli, g, sede)
-        avanzamento(n, len(giorni))
-        if aula:
-            righe = [r for r in righe if r["aula"].lower() == aula.strip().lower()]
-            aule = {k: v for k, v in aule.items() if k.lower() == aula.strip().lower()}
-        if libere:
-            x, y = da_min if da_min is not None else 8 * 60, a_min if a_min is not None else 20 * 60
-            for nome, edificio in aule.items():
-                occ = [(_minuti(r["inizio"]), _minuti(r["fine"])) for r in righe if r["aula"] == nome]
+    for g, righe, aule in griglie:
+        if ammesse is not None:
+            righe = [r for r in righe if r["id_aula"] in ammesse]
+            aule = {i: a for i, a in aule.items() if i in ammesse}
+        if not libere:
+            occupate += righe
+            continue
+        x, y = da_min if da_min is not None else 8 * 60, a_min if a_min is not None else 20 * 60
+        for d in ([g] if g else giorni):
+            data = d.strftime("%d/%m/%Y")
+            for i, a in aule.items():
+                occ = [(_minuti(r["inizio"]), _minuti(r["fine"])) for r in righe
+                       if r["id_aula"] == i and r["data"] == data]
                 lib = _intervalli_liberi(occ, x, y)
                 if dalle or alle:  # libera per tutto l'intervallo chiesto (a meno della tolleranza)
                     lib = [(p, q) for p, q in lib if p <= x + TOLLERANZA and q >= y - TOLLERANZA]
                 if lib:
-                    liberi.append({"data": g.strftime("%d/%m/%Y"), "giorno": sm.GIORNI[g.weekday()], "aula": nome,
+                    liberi.append({"data": data, "giorno": sm.GIORNI[d.weekday()], "aula": a["aula"],
                                    "libera": " · ".join(f"{_hhmm(p)}–{_hhmm(q)}" for p, q in lib),
-                                   "edificio": edificio})
-            continue
-        for r in righe:
-            if testo and not corrisponde(testo, r["descrizione"]):
-                continue
-            if da_min is not None and _minuti(r["fine"]) <= da_min + TOLLERANZA:
-                continue  # finisce prima (o appena dopo) l'inizio della fascia
-            if a_min is not None and _minuti(r["inizio"]) >= a_min - TOLLERANZA:
-                continue
-            occupate.append(r)
+                                   "capienza": (schede.get(i) or {}).get("capienza"),
+                                   "edificio": a["edificio"], "url_aula": url_aula(i)})
+
     nome_sede = dict(scelte()["sedi_aule"]).get(sede, sede)
-    quando = g1.strftime("%d/%m/%Y") + (f" – {g2.strftime('%d/%m/%Y')}" if g2 != g1 else "")
+    quali = f" – {filtro}" if filtro else ""
     if libere:
         fascia = f" dalle {dalle or '08:00'} alle {alle or '20:00'}"
-        ris = Risultato(f"Aule libere – {nome_sede}, {quando}{fascia}",
-                        [Tabella("Aule libere", ["data", "giorno", "aula", "libera", "edificio"], liberi)])
+        colonne = ["data", "giorno", "aula", "libera"] + (["capienza"] if schede else []) + ["edificio", "url_aula"]
+        ris = Risultato(f"Aule libere – {nome_sede}, {_quando(g1, g2)}{fascia}{quali}",
+                        [Tabella("Aule libere", colonne, liberi)])
         ris.note.append("Libere secondo il sito Spazi: un'aula può comunque essere chiusa o riservata.")
         if not liberi:
             ris.note.append("Nessuna aula libera con queste condizioni.")
         return ris
-    ris = Risultato(f"Occupazione aule – {nome_sede}, {quando}", [Tabella("Occupazione aule", [
-        "data", "giorno", "aula", "inizio", "fine", "insegnamento", "codice", "docente", "edificio",
-        "descrizione"], occupate)])
-    if not occupate:
+
+    filtrate = []
+    for r in occupate:
+        if testo and not corrisponde(testo, r["descrizione"]):
+            continue
+        if da_min is not None and _minuti(r["fine"]) <= da_min + TOLLERANZA:
+            continue  # finisce prima (o appena dopo) l'inizio della fascia
+        if a_min is not None and _minuti(r["inizio"]) >= a_min - TOLLERANZA:
+            continue
+        filtrate.append(r)
+    filtrate.sort(key=lambda r: (r["data"][6:], r["data"][3:5], r["data"][:2], _ordine_naturale(r["aula"]),
+                                 r["inizio"]))
+    ris = Risultato(f"Occupazione aule – {nome_sede}{' – ' + aula if aula else ''}, {_quando(g1, g2)}{quali}",
+                    [Tabella("Occupazione aule", ["data", "giorno", "aula", "inizio", "fine", "insegnamento",
+                                                  "codice", "docente", "edificio", "descrizione", "url_aula"],
+                             filtrate)])
+    if not filtrate:
         ris.note.append("Nessuna occupazione con queste condizioni (la domenica e i giorni festivi le aule sono vuote).")
+    return ris
+
+
+# ------------------------------------------------------------ prenotazioni
+
+MESI_IT = {m: n for n, m in enumerate(["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio",
+                                        "agosto", "settembre", "ottobre", "novembre", "dicembre"], 1)}
+MAX_PRENOTAZIONI = 500   # il sito non ne restituisce di più
+
+
+def _data_estesa(testo):
+    """«14 settembre 2026» -> «14/09/2026»."""
+    g, m, a = testo.split()
+    return f"{int(g):02d}/{MESI_IT[m.lower()]:02d}/{a}"
+
+
+def prenotazioni(testo, dal=None, al=None, log=None, stop=None):
+    """Le prenotazioni delle aule (lezioni, esami, eventi) che contengono `testo` (cognome del docente,
+    parte del nome dell'insegnamento o dell'evento, codice) e cadono tra `dal` e `al`; in tutte le sedi."""
+    cercate = parole(testo)
+    if not cercate or max(len(p) for p in cercate) < 3:
+        raise ValueError("Scrivi almeno una parola di 3 lettere: il cognome del docente o parte del nome "
+                         "dell'insegnamento o dell'evento.")
+    g1, g2 = _giorni(dal or date.today(), al or (dal or date.today()) + timedelta(days=6), MAX_GIORNI_PRENOTAZIONI)
+    cli = _cli(log, stop)
+    cli.get(URL_PRENOTAZIONI, {"evn_init": "event", "jaf_currentWFID": "main"})  # apre la sessione
+    # il sito cerca la frase così com'è: gli si chiede la parola più lunga e le altre si controllano qui,
+    # così l'ordine delle parole e le «e», «di» non contano
+    page = soup(cli.get(URL_PRENOTAZIONI, {"riferimento": max(cercate, key=len), **_campi_data("from", g1),
+                                           **_campi_data("to", g2), "evn_ricerca": "", "jaf_currentWFID": "main"}))
+    righe = []
+    tabella = page.find("table", id="richieste")
+    for tr in (tabella.find_all("tr") if tabella else [])[1:]:
+        tds = [txt(td) for td in tr.find_all("td", recursive=False)]
+        if len(tds) < 6 or not corrisponde(testo, tds[1]):
+            continue
+        insegnamento, codice, docente = _dividi_descrizione(tds[1])
+        date_ = [_data_estesa(d) for d in re.findall(r"\d{1,2} [a-zA-Z]+ \d{4}", tds[2])]
+        giorno = re.search(r"\(([^)]+)\)", tds[2])
+        ore = re.findall(r"\d{1,2}:\d{2}", tds[3])
+        righe.append({"insegnamento": insegnamento, "codice": codice, "docente": docente,
+                      "giorno": giorno.group(1) if giorno else None,
+                      "inizio": ore[0] if ore else None, "fine": ore[1] if len(ore) > 1 else None,
+                      "sede": tds[4], "aula": tds[5], "dal": date_[0] if date_ else None,
+                      "al": date_[-1] if date_ else None, "descrizione": tds[1]})
+    ordine_giorni = {g: n for n, g in enumerate(sm.GIORNI)}
+    righe.sort(key=lambda r: (r["insegnamento"], ordine_giorni.get(r["giorno"], 9), r["inizio"] or ""))
+    ris = Risultato(f"Prenotazioni «{testo}» – {_quando(g1, g2)}", [Tabella("Prenotazioni", [
+        "insegnamento", "codice", "docente", "giorno", "inizio", "fine", "sede", "aula", "dal", "al",
+        "descrizione"], righe)])
+    avviso = page.find(class_="titleTableRecordSet")
+    if avviso and "limitato" in txt(avviso):
+        ris.note.append(f"Il sito restituisce al massimo {MAX_PRENOTAZIONI} prenotazioni: alcune possono mancare. "
+                        "Restringi il periodo o scrivi parole più precise.")
+    if not righe:
+        ris.note.append("Nessuna prenotazione trovata in questo periodo.")
     return ris
 
 
@@ -1119,16 +1538,43 @@ def main(argv=None):
     p = comando("docente", "scheda di un docente: insegnamenti, scaglioni, orario (o elenco se il nome è ambiguo)")
     p.add_argument("chi", help="codice del docente (es. 123456) oppure parte del nome")
 
+    def filtri(p):
+        """Le opzioni dei filtri sulle aule (FiltroAule)."""
+        g = p.add_argument_group("quali aule (facoltativo; i valori con --elenca-filtri)")
+        g.add_argument("--categoria", help="es. didattica, studio, laboratorio")
+        g.add_argument("--tipologia", help="es. informatizzata, disegno, \"platea frontale\"")
+        g.add_argument("--dipartimento", help="es. matematica")
+        g.add_argument("--posti", type=int, help="capienza minima (la prima volta legge la scheda di ogni aula)")
+        g.add_argument("--prese-elettriche", action="store_true", help="postazioni con presa elettrica")
+        g.add_argument("--prese-rete", action="store_true", help="postazioni con presa di rete")
+        g.add_argument("--innovativa", action="store_true", help="allestimento per didattica innovativa")
+        g.add_argument("--elenca-filtri", action="store_true", help="mostra i valori dei filtri ed esce")
+
     p = comando("aule", "occupazione delle aule giorno per giorno (sito Spazi), o le aule libere", anno=False)
     p.add_argument("--sede", help="es. MIA (Milano Città Studi), MIB (Bovisa); elenco con --elenca-sedi")
     p.add_argument("--giorno", help="gg/mm/aaaa")
-    p.add_argument("--al", help="ultimo giorno, gg/mm/aaaa (al massimo 14 giorni)")
+    p.add_argument("--al", help=f"ultimo giorno, gg/mm/aaaa (al massimo {MAX_GIORNI_AULE} giorni; con --aula "
+                   f"{MAX_GIORNI_AULA})")
     p.add_argument("--aula", help="solo questa aula, es. T.2.2")
     p.add_argument("--cerca", help="parole nella descrizione: insegnamento, codice o docente")
     p.add_argument("--dalle", help="ora, es. 10:15")
     p.add_argument("--alle", help="ora, es. 12:15")
     p.add_argument("--libere", action="store_true", help="elenca le aule libere (tra --dalle e --alle)")
     p.add_argument("--elenca-sedi", action="store_true", help="mostra i codici delle sedi ed esce")
+    filtri(p)
+
+    p = comando("elenco-aule", "le aule di una sede con capienza, postazioni, dotazioni e software", anno=False)
+    p.add_argument("--sede", help="es. MIA; se omessa tutte le sedi (la prima volta qualche minuto)")
+    p.add_argument("--aula", help="solo le aule il cui nome inizia così, es. T.2")
+    p.add_argument("--senza-dettagli", action="store_true",
+                   help="solo nome, categoria e tipologia, senza leggere la scheda di ogni aula (più veloce)")
+    filtri(p)
+
+    p = comando("prenotazioni", "le prenotazioni delle aule (lezioni, esami, eventi) per docente o nome, in tutte "
+                "le sedi", anno=False)
+    p.add_argument("testo", help="cognome del docente, parte del nome dell'insegnamento o dell'evento, o codice")
+    p.add_argument("--dal", help="gg/mm/aaaa (se omesso oggi)")
+    p.add_argument("--al", help="gg/mm/aaaa (se omesso una settimana dopo --dal)")
 
     p = comando("corso", "informazioni su un corso di studi")
     p.add_argument("corso", nargs="?", help="codice del corso, es. 531 (i codici con --elenca)")
@@ -1143,10 +1589,20 @@ def main(argv=None):
 
     a = ap.parse_args(argv)
     log = lambda m: print(m, file=sys.stderr)  # noqa: E731
+
+    def avanti(cosa):
+        return lambda n, t: print(f"  {cosa}: {n} di {t}", end="\n" if n == t else "\r", file=sys.stderr)
     try:
+        if getattr(a, "elenca_filtri", False):
+            for chiave, voci in opzioni_aule().items():
+                print(f"{chiave.capitalize()}:")
+                for codice, nome in voci:
+                    print(f"  {codice:<6} {nome}")
+            return 0
+        filtro = filtro_aule(a.categoria, a.tipologia, a.dipartimento, a.prese_elettriche, a.prese_rete,
+                             a.innovativa, a.posti) if hasattr(a, "categoria") else None
         if a.comando == "chi-insegna":
-            ris = chi_insegna(a.insegnamento, a.fasce, a.aa, a.sede, log, avanzamento=lambda n, t: print(
-                f"  letti {n} docenti su {t}", end="\n" if n == t else "\r", file=sys.stderr))
+            ris = chi_insegna(a.insegnamento, a.fasce, a.aa, a.sede, log, avanzamento=avanti("schede dei docenti"))
         elif a.comando == "insegnamenti":
             ris = insegnamenti(a.testo, a.docente, a.aa, a.sede)
         elif a.comando == "docente":
@@ -1158,7 +1614,13 @@ def main(argv=None):
                 for codice, nome in scelte()["sedi_aule"]:
                     print(f"  {codice:<6} {nome}")
                 return 0 if a.elenca_sedi else 2
-            ris = occupazione_aule(a.giorno, a.al, a.sede, a.aula, a.cerca, a.dalle, a.alle, a.libere)
+            ris = occupazione_aule(a.giorno, a.al, a.sede, a.aula, a.cerca, a.dalle, a.alle, a.libere,
+                                   filtro or None, log, avanzamento=avanti("occupazioni lette"))
+        elif a.comando == "elenco-aule":
+            ris = elenco_aule(a.sede, a.aula, filtro or None, not a.senza_dettagli, log,
+                              avanzamento=avanti("schede delle aule"))
+        elif a.comando == "prenotazioni":
+            ris = prenotazioni(a.testo, a.dal and _data(a.dal), a.al and _data(a.al), log)
         elif a.comando == "corso":
             if a.elenca or not a.corso:
                 scuole, corsi = corsi_di_studio(a.aa, a.scuola)

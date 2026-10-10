@@ -71,7 +71,12 @@ GUIDA = [
      "È il modo per scoprire il docente quando conosci solo l'orario delle lezioni.\n"
      "• Scheda di un docente: insegnamenti, scaglioni, orario e contatti.\n"
      "• Insegnamenti e docenti: chi insegna cosa, cercando per insegnamento o per docente.\n"
-     "• Aule: chi occupa ogni aula in un giorno, oppure quali aule sono libere in una fascia oraria.\n"
+     "• Aule: chi occupa ogni aula in uno o più giorni, oppure quali aule sono libere in una fascia oraria; "
+     "anche solo le aule con abbastanza posti, di un certo tipo o con certe dotazioni. Per un'aula sola fino "
+     "a 120 giorni (un semestre intero).\n"
+     "• Elenco delle aule: le aule di una sede (o di tutte) con capienza, postazioni, dotazioni e software.\n"
+     "• Prenotazioni delle aule: in tutte le sedi, le prenotazioni (lezioni, esami, eventi) di un docente o di "
+     "un insegnamento, con giorno, ora, aula e periodo.\n"
      "• Informazioni su un corso: piani di studio, docenti, programmi interdisciplinari, scambi.\n"
      "• Vecchi ordinamenti: insegnamenti precedenti al D.M. 509.\n\n"
      "Doppio clic su una riga per vederla per intero; da lì (o con il pulsante sotto la tabella) apri la "
@@ -86,7 +91,10 @@ GUIDA = [
      "momento»; con «dalle: tutto il giorno» basta che abbia lezione quel giorno.\n"
      "• Gli orari non devono essere precisi al quarto d'ora: c'è un margine di 15 minuti, quindi «dalle 16 "
      "alle 18» trova anche la lezione 16:15–18:15.\n"
-     "• Il giorno delle aule si sceglie dal calendario; il corso di studi dai menu «Scuola» e «Corso di studi»."),
+     "• I giorni si scelgono dal calendario; il corso di studi dai menu «Scuola» e «Corso di studi»; il tipo "
+     "di aula, il dipartimento e i posti minimi dai menu «Tipo di aula» e «Dotazioni».\n"
+     "• Capienza e dotazioni vengono dalla scheda di ogni aula: la prima volta il programma le legge tutte "
+     "(mezzo minuto o poco più per sede), poi le ricorda per una settimana."),
     ("Parole da conoscere",
      "• Corso di studi: per esempio Ingegneria Informatica. Ogni corso ha un codice numerico.\n"
      "• Tipo di laurea: Laurea (primo livello), Laurea Magistrale, Ciclo Unico… «ord. 96/23» indica il "
@@ -1383,6 +1391,7 @@ TUTTE_SEDI = "(tutte le sedi)"
 NESSUNA_ORA = "—"                # menu delle ore: nessuna scelta
 TUTTO_IL_GIORNO = "tutto il giorno"  # fascia oraria: qualunque lezione in quel giorno
 GIORNI_BREVI = ["lun", "mar", "mer", "gio", "ven", "sab", "dom"]
+POSTI_MINIMI = [NESSUNA_ORA, "10", "20", "30", "50", "80", "100", "150", "200", "300", "500"]
 MESI = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre",
         "ottobre", "novembre", "dicembre"]
 
@@ -1400,13 +1409,22 @@ RICERCHE = {
                      "Puoi cercare anche solo per docente."),
     "aule": ("Aule: chi le occupa / aule libere",
              "Per uno o più giorni: chi usa ogni aula e a che ora (insegnamento e docente), oppure quali aule sono "
-             "libere in una fascia oraria. I dati sono quelli del sito «Spazi» del Politecnico."),
+             "libere in una fascia oraria, anche solo tra quelle di un certo tipo o con abbastanza posti. Per "
+             f"un'aula sola puoi guardare fino a {cerca.MAX_GIORNI_AULA} giorni. Dati del sito «Spazi» del Politecnico."),
+    "elenco_aule": ("Elenco delle aule (posti, dotazioni)",
+                    "Le aule di una sede, o di tutte, con capienza, postazioni, dotazioni (proiettore, prese…) e "
+                    "software installato. Puoi tenere solo quelle di un certo tipo, dipartimento o con abbastanza posti."),
+    "prenotazioni": ("Prenotazioni delle aule",
+                     "In tutte le sedi, le prenotazioni delle aule (lezioni, esami, eventi) che contengono le parole "
+                     "cercate: il cognome di un docente, il nome o il codice di un insegnamento. Per ognuna giorno, "
+                     "ora, sede, aula e periodo."),
     "corso": ("Informazioni su un corso di studi",
               "Struttura e piani di studio, elenco dei docenti con i loro insegnamenti, programmi "
               "interdisciplinari, accordi di scambio internazionali. Scegli la scuola e poi il corso."),
     "vecchi": ("Vecchi ordinamenti (prima del D.M. 509)",
                "Insegnamenti delle lauree di vecchio ordinamento, cercati per nome o per docente."),
 }
+SENZA_ANNO = {"aule", "elenco_aule", "prenotazioni", "vecchi"}  # il sito Spazi e i vecchi ordinamenti
 
 
 def _ora_dopo(ora, ore=2):
@@ -1558,6 +1576,69 @@ class Calendario(tk.Toplevel):
         self.scelta(giorno)
 
 
+def _nome_leggibile(nome):
+    """«AULA DIDATTICA» -> «Aula didattica»; «DIPARTIMENTO DI MATEMATICA» -> «Matematica»."""
+    nome = re.sub(r"^DIPARTIMENTO DI\s+", "", nome)
+    return nome[:1].upper() + nome[1:].lower()
+
+
+class FiltriAule:
+    """Due righe di un modulo per scegliere quali aule (cerca.FiltroAule): categoria, tipologia e posti
+    minimi; dipartimento e dotazioni. I menu si riempiono con imposta_opzioni() quando arrivano dal sito."""
+
+    VUOTI = {"categorie": "qualsiasi categoria", "tipologie": "qualsiasi tipologia",
+             "dipartimenti": "qualsiasi dipartimento"}
+
+    def __init__(self, fr, r):
+        lbl = ttk.Label(fr, text="Tipo di aula (facoltativo)", width=24)
+        lbl.grid(row=r, column=0, sticky="w")
+        riga = ttk.Frame(fr)
+        riga.grid(row=r, column=1, columnspan=2, sticky="w", pady=3)
+        self.menu = {"categorie": self._menu(riga, 22), "tipologie": self._menu(riga, 20)}
+        ttk.Label(riga, text="con almeno").pack(side="left", padx=(8, 4))
+        self.posti = ttk.Combobox(riga, state="readonly", width=5, values=POSTI_MINIMI)
+        self.posti.set(NESSUNA_ORA)
+        self.posti.pack(side="left")
+        ttk.Label(riga, text="posti").pack(side="left", padx=4)
+        aiuto("Solo le aule di questa categoria (es. aula didattica, aula studio) e tipologia (es. informatizzata, "
+              "disegno), con almeno questi posti. Per i posti il programma legge la scheda di ogni aula della "
+              "sede: la prima volta mezzo minuto o poco più, poi le ricorda per una settimana.",
+              lbl, *self.menu.values(), self.posti)
+        lbl = ttk.Label(fr, text="Dotazioni (facoltative)", width=24)
+        lbl.grid(row=r + 1, column=0, sticky="w")
+        riga = ttk.Frame(fr)
+        riga.grid(row=r + 1, column=1, columnspan=2, sticky="w", pady=3)
+        self.menu["dipartimenti"] = self._menu(riga, 40)
+        self.spunte = {}
+        for chiave, testo in (("prese_elettriche", "prese elettriche"), ("prese_rete", "prese di rete"),
+                              ("innovativa", "didattica innovativa")):
+            self.spunte[chiave] = tk.BooleanVar(value=False)
+            ttk.Checkbutton(riga, text=testo, variable=self.spunte[chiave]).pack(side="left", padx=(8, 0))
+        aiuto("Solo le aule di un dipartimento, o con postazioni dotate di presa elettrica o di rete, o allestite "
+              "per la didattica innovativa (come nella «Ricerca aula» del sito Spazi).", lbl, self.menu["dipartimenti"])
+        self.codici = {k: {} for k in self.menu}
+
+    def _menu(self, riga, larghezza):
+        cb = ttk.Combobox(riga, state="readonly", width=larghezza)
+        cb.pack(side="left", padx=(0, 4))
+        return cb
+
+    def imposta_opzioni(self, opzioni=None):
+        """I valori dei menu (cerca.opzioni_aule()); senza, solo la voce «qualsiasi …»."""
+        for k, cb in self.menu.items():
+            self.codici[k] = {_nome_leggibile(nome): codice for codice, nome in (opzioni or {}).get(k, [])}
+            cb.config(values=[self.VUOTI[k]] + list(self.codici[k]))
+            cb.set(self.VUOTI[k])
+
+    def filtro(self):
+        """Il cerca.FiltroAule scelto, o None se non c'è nessun filtro."""
+        codice = {k: self.codici[k].get(cb.get()) for k, cb in self.menu.items()}
+        f = cerca.FiltroAule(codice["categorie"], codice["tipologie"], codice["dipartimenti"],
+                             **{k: v.get() for k, v in self.spunte.items()},
+                             posti=int(self.posti.get()) if self.posti.get().isdigit() else None)
+        return f or None
+
+
 class SchedaCerca(ttk.Frame):
     """Ricerche al volo sul sito (cerca.py): non serve scaricare nulla prima, i risultati arrivano
     in pochi secondi. Ogni ricerca gira in un thread e manda messaggi nella coda self.q.
@@ -1579,9 +1660,10 @@ class SchedaCerca(ttk.Frame):
         self.cb = {}                    # menu: chiave -> Combobox
         self.campi = {}                 # campi con suggerimenti: chiave -> CampoSuggerito
         self.voci = {}                  # suggerimenti già calcolati: (tipo, anno, sede) -> [(etichetta, valore)]
-        self.aule = {}                  # sede delle aule -> nomi delle aule
+        self.aule = {}                  # sede delle aule -> [(nome, nome)] per i suggerimenti
         self.in_caricamento = set()     # elenchi che si stanno scaricando
-        self.giorno_aule = date.today()
+        self.date = {}                  # righe «giorno»: chiave -> data scelta
+        self.filtri = {}                # FiltriAule dei moduli: "aule", "el"
         self._costruisci()
         self._tipo_cambiato()
         self._in_sottofondo(cerca.scelte, self._scelte_caricate)
@@ -1623,6 +1705,8 @@ class SchedaCerca(ttk.Frame):
         self._modulo_docente(self.moduli["docente"])
         self._modulo_insegnamenti(self.moduli["insegnamenti"])
         self._modulo_aule(self.moduli["aule"])
+        self._modulo_elenco_aule(self.moduli["elenco_aule"])
+        self._modulo_prenotazioni(self.moduli["prenotazioni"])
         self._modulo_corso(self.moduli["corso"])
         self._modulo_vecchi(self.moduli["vecchi"])
 
@@ -1702,36 +1786,21 @@ class SchedaCerca(ttk.Frame):
     def _modulo_aule(self, fr):
         cb = self._menu(fr, 0, "aule_sede", "Sede", "La sede (o il singolo indirizzo) di cui vedere le aule. "
                         "Milano Leonardo è «Milano Città Studi».")
-        cb.bind("<<ComboboxSelected>>", lambda e: self._carica_aule())
-        lbl = ttk.Label(fr, text="Giorno", width=24)
-        lbl.grid(row=1, column=0, sticky="w")
-        giorno = ttk.Frame(fr)
-        giorno.grid(row=1, column=1, columnspan=2, sticky="w", pady=3)
-        self.var["aule_giorno"] = tk.StringVar()
-        e = self.e_giorno = ttk.Entry(giorno, textvariable=self.var["aule_giorno"], width=16, state="readonly")
-        e.pack(side="left")
-        e.bind("<Button-1>", lambda ev: self._scegli_giorno())
-        ttk.Button(giorno, text="📅 Scegli…", command=self._scegli_giorno).pack(side="left", padx=(6, 4))
-        for testo, n in (("Oggi", 0), ("Domani", 1)):
-            ttk.Button(giorno, text=testo, width=8,
-                       command=lambda n=n: self._imposta_giorno(date.today() + timedelta(days=n))).pack(
-                side="left", padx=(0, 4))
-        self._imposta_giorno(date.today())
-        aiuto("Il giorno da guardare: scegli dal calendario, oppure «Oggi» o «Domani».", lbl, e)
-        cb = self._menu(fr, 2, "aule_n", "Quanti giorni", f"Per guardare più giorni di fila, a partire da quello "
-                        f"scelto (al massimo {cerca.MAX_GIORNI_AULE}).", larghezza=6)
-        cb.config(values=[str(n) for n in range(1, cerca.MAX_GIORNI_AULE + 1)])
-        cb.set("1")
-        self._suggerito(fr, 3, "aule_aula", "Aula (facoltativa)", "es. T.2.2 – compaiono le aule della sede",
+        cb.bind("<<ComboboxSelected>>", lambda e: self._carica_aule("aule"))
+        quanti = list(range(1, cerca.MAX_GIORNI_AULE + 1)) + [21, 30, 60, 90, cerca.MAX_GIORNI_AULA]
+        self._giorno(fr, 1, "aule_giorno", "Giorno", "Il primo giorno da guardare: scegli dal calendario, oppure "
+                     "«Oggi» o «Domani».", quanti, f"Quanti giorni di fila guardare: per tutte le aule fino a "
+                     f"{cerca.MAX_GIORNI_AULE}, per un'aula sola fino a {cerca.MAX_GIORNI_AULA} (un semestre).")
+        self._suggerito(fr, 2, "aule_aula", "Aula (facoltativa)", "es. T.2.2 – compaiono le aule della sede",
                         "Solo questa aula: scrivi l'inizio del nome e scegli dall'elenco (prima scegli la sede).",
-                        lambda t: self._suggerisci_aula(t), larghezza=16)
-        self._campo(fr, 4, "aule_testo", "Parole (facoltative)", "es. geometria  oppure  rossi  oppure  082747",
+                        lambda t: self._suggerisci_aula("aule", t), larghezza=16)
+        self._campo(fr, 3, "aule_testo", "Parole (facoltative)", "es. geometria  oppure  rossi  oppure  082747",
                     "Tiene solo le occupazioni che contengono tutte queste parole: nome o codice "
                     "dell'insegnamento, nome del docente.")
         lbl = ttk.Label(fr, text="Ore (facoltative)")
-        lbl.grid(row=5, column=0, sticky="w")
+        lbl.grid(row=4, column=0, sticky="w")
         ore = ttk.Frame(fr)
-        ore.grid(row=5, column=1, columnspan=2, sticky="w", pady=3)
+        ore.grid(row=4, column=1, columnspan=2, sticky="w", pady=3)
         menu_ore = [NESSUNA_ORA] + cerca.ORE_LEZIONE
         ttk.Label(ore, text="dalle").pack(side="left")
         self.cb_aule_dalle = ttk.Combobox(ore, state="readonly", width=6, values=menu_ore)
@@ -1744,11 +1813,35 @@ class SchedaCerca(ttk.Frame):
         aiuto("Una fascia oraria: con «Chi occupa» mostra le occupazioni in quelle ore; con «Aule libere» le aule "
               "libere per tutta la fascia (senza ore: gli intervalli liberi tra le 8 e le 20).",
               lbl, self.cb_aule_dalle, self.cb_aule_alle)
+        self.filtri["aule"] = FiltriAule(fr, 5)
         self.var_libere = tk.BooleanVar(value=False)
         modo = ttk.Frame(fr)
-        modo.grid(row=6, column=1, columnspan=2, sticky="w", pady=(2, 0))
+        modo.grid(row=7, column=1, columnspan=2, sticky="w", pady=(2, 0))
         ttk.Radiobutton(modo, text="Chi occupa le aule", value=False, variable=self.var_libere).pack(side="left")
         ttk.Radiobutton(modo, text="Aule libere", value=True, variable=self.var_libere).pack(side="left", padx=12)
+
+    def _modulo_elenco_aule(self, fr):
+        cb = self._menu(fr, 0, "el_sede", "Sede", "La sede di cui elencare le aule, oppure tutte (la prima volta "
+                        "con le schede delle aule ci vogliono alcuni minuti).")
+        cb.bind("<<ComboboxSelected>>", lambda e: self._carica_aule("el"))
+        self._suggerito(fr, 1, "el_aula", "Aula (facoltativa)", "es. T.2  – solo le aule il cui nome inizia così",
+                        "Solo le aule il cui nome inizia così (vengono proposte mentre scrivi).",
+                        lambda t: self._suggerisci_aula("el", t), larghezza=16)
+        self.filtri["el"] = FiltriAule(fr, 2)
+        self.var_dettagli = tk.BooleanVar(value=True)
+        c = ttk.Checkbutton(fr, text="Con capienza, postazioni, dotazioni e software di ogni aula",
+                            variable=self.var_dettagli)
+        c.grid(row=4, column=1, columnspan=2, sticky="w", pady=(2, 0))
+        aiuto("Legge la scheda di ogni aula sul sito: la prima volta mezzo minuto o poco più per sede, poi il "
+              "programma la ricorda per una settimana. Senza, vedi solo nome, categoria e tipologia.", c)
+
+    def _modulo_prenotazioni(self, fr):
+        self._campo(fr, 0, "pren_testo", "Parole", "es. rossi  oppure  analisi matematica  oppure  082747",
+                    "Il cognome del docente, parte del nome dell'insegnamento o dell'evento, o il codice. Tutte le "
+                    "parole devono comparire, in qualsiasi ordine.")
+        self._giorno(fr, 1, "pren_dal", "Dal giorno", "Il primo giorno del periodo in cui cercare.",
+                     [1, 7, 14, 30, 60, 120, 180, cerca.MAX_GIORNI_PRENOTAZIONI], "Quanti giorni di fila: con 7 "
+                     "vedi ogni lezione settimanale una volta, con il periodo di validità.", predefinito=7)
 
     def _modulo_corso(self, fr):
         cb = self._menu(fr, 0, "corso_scuola", "Scuola", "La scuola del corso di studi.", larghezza=70)
@@ -1850,6 +1943,38 @@ class SchedaCerca(ttk.Frame):
         aiuto(spiegazione, lbl, e)
         return e
 
+    def _giorno(self, fr, r, chiave, etichetta, spiegazione, quanti, spiegazione_quanti, predefinito=1):
+        """Riga per scegliere un periodo: il primo giorno (calendario, «Oggi», «Domani») e quanti giorni."""
+        lbl = self._etichetta(fr, r, etichetta)
+        riga = ttk.Frame(fr)
+        riga.grid(row=r, column=1, columnspan=2, sticky="w", pady=3)
+        self.var[chiave] = tk.StringVar()
+        e = ttk.Entry(riga, textvariable=self.var[chiave], width=16, state="readonly")
+        e.pack(side="left")
+        scegli = lambda: Calendario(e, self.date[chiave], lambda g: self._imposta_giorno(chiave, g))  # noqa: E731
+        e.bind("<Button-1>", lambda ev: scegli())
+        ttk.Button(riga, text="📅 Scegli…", command=scegli).pack(side="left", padx=(6, 4))
+        for testo, n in (("Oggi", 0), ("Domani", 1)):
+            ttk.Button(riga, text=testo, width=8,
+                       command=lambda n=n: self._imposta_giorno(chiave, date.today() + timedelta(days=n))).pack(
+                side="left", padx=(0, 4))
+        self._imposta_giorno(chiave, date.today())
+        aiuto(spiegazione, lbl, e)
+        ttk.Label(riga, text="giorni di fila:").pack(side="left", padx=(8, 4))
+        cb = self.cb[chiave + "_n"] = ttk.Combobox(riga, state="readonly", width=5, values=[str(n) for n in quanti])
+        cb.set(str(predefinito))
+        cb.pack(side="left")
+        aiuto(spiegazione_quanti, cb)
+
+    def _imposta_giorno(self, chiave, giorno):
+        self.date[chiave] = giorno
+        self.var[chiave].set(f"{GIORNI_BREVI[giorno.weekday()]} {giorno.strftime('%d/%m/%Y')}")
+
+    def _periodo(self, chiave):
+        """(primo giorno, ultimo giorno) scelti in una riga _giorno."""
+        dal = self.date[chiave]
+        return dal, dal + timedelta(days=int(self.cb[chiave + "_n"].get()) - 1)
+
     def _menu(self, fr, r, chiave, etichetta, spiegazione, larghezza=38):
         lbl = self._etichetta(fr, r, etichetta)
         cb = self.cb[chiave] = ttk.Combobox(fr, state="readonly", width=larghezza, values=[VUOTO])
@@ -1865,7 +1990,7 @@ class SchedaCerca(ttk.Frame):
                 fr.grid()
             else:
                 fr.grid_remove()
-        if k in ("aule", "vecchi"):  # il sito Spazi e i vecchi ordinamenti non dipendono dall'anno
+        if k in SENZA_ANNO:
             self.fr_anno.grid_remove()
         else:
             self.fr_anno.grid()
@@ -1905,14 +2030,6 @@ class SchedaCerca(ttk.Frame):
     def _togli_fascia(self):
         self.var["chi_fasce"].set(", ".join(self._fasce()[:-1]))
 
-    # giorno delle aule
-    def _imposta_giorno(self, giorno):
-        self.giorno_aule = giorno
-        self.var["aule_giorno"].set(f"{GIORNI_BREVI[giorno.weekday()]} {giorno.strftime('%d/%m/%Y')}")
-
-    def _scegli_giorno(self):
-        Calendario(self.e_giorno, self.giorno_aule, self._imposta_giorno)
-
     # ---------------------------------------------------------------- elenchi dal sito
     def _in_sottofondo(self, funzione, al_termine):
         """Esegue funzione() in un thread; al_termine(risultato, errore) gira poi nel thread della finestra."""
@@ -1946,8 +2063,17 @@ class SchedaCerca(ttk.Frame):
             self.cb[k].set(TUTTE_SEDI)
         self.map_sede_aule = {nome: cod for cod, nome in sc["sedi_aule"]}
         self.cb["aule_sede"].config(values=list(self.map_sede_aule))
+        self.cb["el_sede"].config(values=[TUTTE_SEDI] + [nome for cod, nome in sc["sedi_aule"] if len(cod) == 3])
+        for f in self.filtri.values():
+            f.imposta_opzioni()
+        self._in_sottofondo(cerca.opzioni_aule, self._opzioni_aule_caricate)
         self._stato("Pronto: scegli cosa cercare, compila i campi e premi «Cerca».")
         self._anno_cambiato()
+
+    def _opzioni_aule_caricate(self, opzioni, err):
+        if not err:
+            for f in self.filtri.values():
+                f.imposta_opzioni(opzioni)
 
     def _aa(self):
         return self.map_aa.get(self.cb_aa.get())
@@ -1982,9 +2108,10 @@ class SchedaCerca(ttk.Frame):
             self.voci[chiave] = (cerca.nomi_insegnamenti(aa, sede) if tipo == "ins" else cerca.nomi_docenti(aa))
         return cerca.suggerimenti(self.voci[chiave], testo)
 
-    def _carica_aule(self):
-        sede = self.map_sede_aule.get(self.cb["aule_sede"].get())
-        self.campi["aule_aula"].imposta("")
+    def _carica_aule(self, modulo):
+        """Le aule della sede scelta nel modulo («aule» o «el»), per i suggerimenti del campo «Aula»."""
+        sede = self.map_sede_aule.get(self.cb[modulo + "_sede"].get())
+        self.campi[modulo + "_aula"].imposta("")
         if not sede or sede in self.aule or ("aule", sede) in self.in_caricamento:
             return
         self.in_caricamento.add(("aule", sede))
@@ -1995,8 +2122,8 @@ class SchedaCerca(ttk.Frame):
                 self.aule[sede] = [(a, a) for a in aule]
         self._in_sottofondo(lambda: cerca.aule_sede(sede), fatto)
 
-    def _suggerisci_aula(self, testo):
-        voci = self.aule.get(self.map_sede_aule.get(self.cb["aule_sede"].get()), [])
+    def _suggerisci_aula(self, modulo, testo):
+        voci = self.aule.get(self.map_sede_aule.get(self.cb[modulo + "_sede"].get()), [])
         t = testo.lower()
         return [v for v in voci if v[0].lower().startswith(t)][:30] or cerca.suggerimenti(voci, testo)
 
@@ -2032,7 +2159,7 @@ class SchedaCerca(ttk.Frame):
         v = {c: s.get().strip() for c, s in self.var.items()}
         t = {c: campo.testo() for c, campo in self.campi.items()}
         aa = self._aa()
-        if k not in ("aule", "vecchi") and not aa:
+        if k not in SENZA_ANNO and not aa:
             raise ValueError("Aspetta che il programma si colleghi al sito: l'anno accademico non è ancora caricato.")
         sedi = {c: self.map_sede.get(self.cb[c].get()) for c in ("chi_sede", "ins_sede")}  # None = tutte
         prog = lambda n, tot: self.q.put(("prog", f"Leggo le schede dei docenti: {n} di {tot}…"))  # noqa: E731
@@ -2064,13 +2191,29 @@ class SchedaCerca(ttk.Frame):
             dalle, alle = (c.get() if c.get() != NESSUNA_ORA else None for c in (self.cb_aule_dalle, self.cb_aule_alle))
             if dalle and alle and alle <= dalle:
                 raise ValueError("L'ora «alle» deve venire dopo l'ora «dalle».")
-            dal = self.giorno_aule
-            al = dal + timedelta(days=int(self.cb["aule_n"].get()) - 1)
-            libere = self.var_libere.get()
-            prog_g = lambda n, tot: self.q.put(("prog", f"Leggo le occupazioni: giorno {n} di {tot}…"))  # noqa: E731
+            dal, al = self._periodo("aule_giorno")
+            if (al - dal).days >= cerca.MAX_GIORNI_AULE and not aula:
+                raise ValueError(f"Per tutte le aule si possono guardare al massimo {cerca.MAX_GIORNI_AULE} giorni: "
+                                 "per un periodo più lungo scegli un'aula sola.")
+            libere, filtro = self.var_libere.get(), self.filtri["aule"].filtro()
+            prog_s = lambda n, tot: self.q.put(("prog", f"Leggo dal sito: {n} di {tot}…"))  # noqa: E731
             return (lambda: cerca.occupazione_aule(dal, al, sede, aula or None, v["aule_testo"] or None, dalle,
-                                                   alle, libere, stop=stop, avanzamento=prog_g),
+                                                   alle, libere, filtro, stop=stop, avanzamento=prog_s),
                     "Leggo l'occupazione delle aule…")
+        if k == "elenco_aule":
+            if self.cb["el_sede"].get() not in (TUTTE_SEDI, *self.map_sede_aule):
+                raise ValueError("Scegli la sede delle aule (oppure «tutte le sedi»).")
+            sede = self.map_sede_aule.get(self.cb["el_sede"].get())  # None = tutte
+            filtro, dettagli = self.filtri["el"].filtro(), self.var_dettagli.get()
+            prog_s = lambda n, tot: self.q.put(("prog", f"Leggo le schede delle aule: {n} di {tot}…"))  # noqa: E731
+            return (lambda: cerca.elenco_aule(sede, t["el_aula"] or None, filtro, dettagli, stop=stop,
+                                              avanzamento=prog_s), "Leggo l'elenco delle aule…")
+        if k == "prenotazioni":
+            if not any(len(p) >= 3 for p in cerca.parole(v["pren_testo"])):
+                raise ValueError("Scrivi almeno una parola di 3 lettere: il cognome del docente o parte del nome "
+                                 "dell'insegnamento o dell'evento.")
+            dal, al = self._periodo("pren_dal")
+            return (lambda: cerca.prenotazioni(v["pren_testo"], dal, al, stop=stop), "Cerco le prenotazioni…")
         if k == "corso":
             corso = self.map_corsi.get(self.cb["corso_cod"].get())
             if not corso:
@@ -2214,7 +2357,7 @@ class SchedaCerca(ttk.Frame):
     def _url(self, riga):
         if not riga:
             return None
-        for c in ("url_docente", "valore"):
+        for c in ("url_docente", "url_aula", "valore"):
             u = str(riga.get(c) or "")
             if u.startswith("http"):
                 return u
