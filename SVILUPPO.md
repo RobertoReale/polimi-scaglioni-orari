@@ -6,7 +6,8 @@ Come funziona il programma dall'interno. Per l'uso normale vedi il [README](READ
 
 Il programma legge le pagine pubbliche dei Manifesti degli Studi del PoliMi, ne ricava corsi → piani →
 insegnamenti → scaglioni → lezioni, salva tutto in un file JSON e da quel file costruisce tabelle da filtrare
-ed esportare.
+ed esportare. In più, `cerca.py` fa ricerche al volo (chi insegna cosa, schede dei docenti, occupazione delle
+aule…) senza passare dal file JSON.
 
 ## I file e cosa fa ciascuno
 
@@ -16,10 +17,11 @@ ed esportare.
 | `avvia.py` | controlla Python e tkinter, installa le librerie in `.venv` se mancano, apre l'interfaccia | `interfaccia.py` |
 | `scarica_manifesti.py` | **legge il sito** e scrive il JSON. Nessuna interfaccia: si usa anche da terminale | `requests`, `bs4` |
 | `esporta.py` | **dal JSON alle tabelle** e ai file (Excel, CSV, HTML, JSON, calendario). Non accede al sito | `openpyxl` |
-| `interfaccia.py` | **solo l'interfaccia** (tkinter): raccoglie le scelte e chiama gli altri due moduli | i due moduli sopra |
+| `cerca.py` | **ricerche al volo** sul sito (scheda 3 e terminale): ogni ricerca restituisce un `Risultato` | i due moduli sopra |
+| `interfaccia.py` | **solo l'interfaccia** (tkinter): raccoglie le scelte e chiama gli altri moduli | i moduli sopra |
 
-La regola: la logica sta in `scarica_manifesti.py` ed `esporta.py`, che funzionano anche senza interfaccia;
-`interfaccia.py` non decide niente sui dati.
+La regola: la logica sta in `scarica_manifesti.py`, `esporta.py` e `cerca.py`, che funzionano anche senza
+interfaccia; `interfaccia.py` non decide niente sui dati.
 
 ## Percorso dei dati
 
@@ -36,6 +38,8 @@ La regola: la logica sta in `scarica_manifesti.py` ed `esporta.py`, che funziona
                                                                ▼
                                                             esporta.esporta(...) / esporta_xlsx(...) /
                                                             esporta_calendario(...)
+
+ sito PoliMi (Manifesti + Spazi) ──► cerca.<ricerca>(...) ──► Risultato ──► stampa() / salva() / scheda 3
 ```
 
 ## Com'è fatto il sito
@@ -85,6 +89,14 @@ Regole che valgono ovunque:
   e lo scaricamento continua; nelle tabelle compare nella colonna *Note* o *Stato*.
 - **Cache.** `Client.get()` salva ogni pagina in `cache/<sha1 dell'indirizzo>.html` e la riusa. La scrittura
   è atomica (file temporaneo + rinomina), così un'interruzione non lascia pagine a metà.
+- **Pagine di errore del sito.** Quando una pagina del sito è guasta, il sito risponde con una sua pagina
+  di errore: «Errore interno, fai click per effettuare il logout» (codice 200, poche centinaia di byte) oppure
+  «Server Error (POLIJ_…)» (codice 500). `errore_del_sito()` le riconosce e `Client` solleva `ErroreSito`
+  subito, senza riprovare e **senza salvarle in cache** (altrimenti ogni scaricamento successivo le
+  riuserebbe). Per un insegnamento il messaggio finisce in `errore` (colonna *Note*) con `errore_sito: true`.
+  Successo davvero: nell'ottobre 2026 la pagina di dettaglio (`EVN_DETTAGLIO_RIGA_MANIFESTO`) dava errore per
+  tutti gli insegnamenti 2026/27 quando l'indirizzo conteneva `idRiga`, anche aprendola dal sito stesso.
+- **POST.** `Client.post()` invia i moduli di ricerca del sito; non usa mai la cache.
 - **Parallelismo.** `in_parallelo()` usa un pool di thread (normale: 4). `Client` tiene una sessione HTTP per
   thread. L'interruzione passa per un `threading.Event` (`stop`) che anche le pause controllano.
 
@@ -109,6 +121,7 @@ corsi_di_studio[]
       url_dettaglio, n_scaglioni        (più alcuni codici interni del sito)
       nota_dettaglio    perché non ci sono sezioni (es. erogato da un ateneo partner)
       errore            se il dettaglio non si è potuto leggere
+      errore_sito       true se la causa è una pagina di errore del sito (ErroreSito)
       sezioni[]
         id_sezione, n_scaglioni
         scaglioni[]     da, a (iniziali del cognome: da compreso, a escluso), docenti[], righe[] (moduli)
@@ -145,12 +158,45 @@ Due logiche da conoscere:
 - **`unisci_duplicati()`** – due righe sono "la stessa" se coincidono in tutte le colonne tranne quelle di
   `VARIABILI_PER_PIANO` (corso, piano, link…); quelle colonne diventano elenchi separati da ` | `.
 
+## Le ricerche al volo (`cerca.py`)
+
+Ogni ricerca è una funzione che legge il sito **senza cache** (le ricerche devono riflettere il sito di oggi)
+e restituisce un `Risultato`: un titolo, una o più `Tabella(nome, colonne, righe)` (la prima è la principale;
+le righe sono dict come quelle di `esporta.py`) e una lista di `note` per l'utente. `stampa()` lo scrive nel
+terminale, `salva()` su file (Excel: un foglio per tabella; gli altri formati: la tabella principale).
+I nomi leggibili delle colonne nuove sono aggiunti a `esporta.LABELS` in cima al file.
+
+| Funzione | Pagina del sito | Note |
+|---|---|---|
+| `insegnamenti()` | `RicercaInsegnamentiErogatiInLinguaInglesePublic.do` (POST) | nonostante il nome elenca **tutti** gli insegnamenti, ognuno con i docenti e il loro codice `k_doc`. Ogni insegnamento compare sotto un solo corso |
+| `docenti()` | `RicercaPerDocentiPublic.do` (POST, «Cerca Docenti») | se risponde con un errore (ottobre 2026: errore 500 per qualunque nome) cerca il nome con la pagina sopra |
+| `scheda_docente()` | `RicercaPerDocentiPublic.do?evn_prodotti` (dati) e `?evn_DIDATTICA_AJAX` (insegnamenti) | per ogni insegnamento un blocco `div.tabs` con la tabella degli scaglioni; l'orario si chiede con `?evn_didattica_orario_incarico_AJAX` + il `qs` della scheda «Orario didattico», ed è la stessa griglia dei manifesti (`scarica_manifesti.parse_orario`) |
+| `chi_insegna()` | le due sopra | i docenti dell'insegnamento (prima pagina), poi la scheda di ciascuno (3 in parallelo); `Fascia.coperta_da()` confronta le lezioni con le fasce |
+| `occupazione_aule()` | sito Spazi: `OccupazioniGiornoEsatto.do` | serve prima una richiesta `?evn_init=event` per aprire la sessione. Una riga per aula, griglia a quarti d'ora che parte dalle 08:00: l'inizio si ricava dalle etichette delle ore (`innerOrario`, centrate sull'ora). Testo dell'occupazione: «NOME CODICE - COGNOME NOME» |
+| `info_corso()` | `MostraIndirizziPublic.do`, `MostraFacultyPublic.do`, `extra/ProgrammiInterdisciplinariPublic.do`, `extra/ScambiInternazionaliPublic.do` | basta `k_corso_la`, senza scuola. Lette con il lettore generico `_blocchi_pagina()` |
+| `vecchi_ordinamenti()` | `RicercaPerInsegnamentoVOPublic.do` (POST) | |
+
+**Leggere le tabelle del sito.** `righe_tabella()` trasforma una tabella in dict: combina più righe
+d'intestazione (`<th>`, `HeadColumn`, testo in grassetto), usa le righe di una sola cella come «gruppo» (es. il
+corso, il Paese) e riconosce le schede «voce | valore» (`ElementInfoCard1` + `ElementInfoCard2`). Il testo si
+legge con `_testo()`, che unisce senza spazi i tag in linea: il sito evidenzia la parola cercata anche dentro le
+parole (`G<b>E</b>OMETRIA`).
+
+**Aggiungere una ricerca**: una funzione in `cerca.py` che restituisce un `Risultato`, il sotto-comando in
+`main()`; nell'interfaccia una voce in `RICERCHE`, i campi in `SchedaCerca._costruisci()` (con `_campo()` o
+`_menu()`, che mettono anche esempio e spiegazione) e la lettura dei campi in `SchedaCerca._prepara()`.
+`_prepara()` legge **tutti** i valori dei widget prima di avviare il thread: il thread non deve toccare tkinter.
+
 ## L'interfaccia (`interfaccia.py`)
 
 - `App` – la finestra: intestazione con la descrizione e il pulsante *Guida*, e due schede.
 - `SchedaScarica` – le scelte diventano un oggetto `scarica_manifesti.Opzioni` in `_opzioni()`, che controlla
   anche che non manchi niente; `_riepilogo_scelte()` le mostra in parole prima di partire.
 - `SchedaEsplora` – carica il JSON, costruisce le tabelle, applica i filtri, esporta.
+- `SchedaCerca` – le ricerche al volo: ① il tipo di ricerca, ② i suoi campi (un riquadro per tipo, si vede
+  solo quello scelto), ③ i risultati (una tabella alla volta; doppio clic = dettaglio, con i pulsanti per
+  aprire la scheda del docente o la pagina sul sito), ④ il salvataggio. L'anno accademico parte da quello
+  attuale del sito, visibile e modificabile; le sedi partono da «(tutte le sedi)».
 - `Suggerimento` / `aiuto()` – la spiegazione che compare tenendo il mouse su un controllo.
 - `GUIDA` – il testo della finestra *Guida*.
 
@@ -205,3 +251,9 @@ Non ci sono test automatici. Il modo più affidabile è confrontare i risultati 
    salvando `json.dumps(tabelle(dati), sort_keys=True)`), anche con `unisci_duplicati()`.
 3. **Interfaccia** – avvia `python avvia.py` e prova: scelte mancanti → messaggio; riepilogo prima
    dell'avvio; interruzione a metà → i dati parziali si aprono nella scheda 2; ogni esportazione si apre.
+4. **Ricerche** – un caso di cui si conosce la risposta, da terminale e poi nella scheda 3:
+   ```bash
+   python cerca.py chi-insegna "geometria e algebra lineare" --sede MI --fasce "gio 08:15-10:15, ven 10:15-13:15"
+   ```
+   (2026/27: in cima Compagnoni Marco, 2/2, scaglione BRU – CON). Prova anche `docente`, `aule` (anche
+   `--libere`), `corso` con tutte le `--mostra`, e il salvataggio `--out` in ogni formato.

@@ -3,10 +3,11 @@
 Interfaccia grafica dello scraper dei Manifesti degli Studi PoliMi.
 Avvio: avvia.bat (Windows), ./avvia.sh (Linux/macOS) oppure  python avvia.py
 
-La finestra ha due schede, che corrispondono ai due passi d'uso:
+La finestra ha tre schede: le prime due sono i due passi d'uso, la terza le ricerche al volo.
     SchedaScarica  scelte dell'utente -> scarica_manifesti.Opzioni -> scarica_manifesti.scarica()
     SchedaEsplora  file JSON -> esporta.tabelle() -> filtri -> esporta.esporta*()
-Questo file contiene solo l'interfaccia: la logica sta in scarica_manifesti.py ed esporta.py.
+    SchedaCerca    campi della ricerca -> cerca.<ricerca>() -> cerca.Risultato -> tabella, salvataggio
+Questo file contiene solo l'interfaccia: la logica sta in scarica_manifesti.py, esporta.py e cerca.py.
 
 Lo scaricamento gira in un thread separato, così la finestra resta reattiva. Il thread non tocca
 mai i widget (tkinter non lo permette): manda messaggi nella coda self.q, che il thread della
@@ -22,11 +23,13 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
+from datetime import date, timedelta
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 from tkinter.scrolledtext import ScrolledText
 
+import cerca
 import esporta as ex
 import scarica_manifesti as ps
 
@@ -41,7 +44,8 @@ MAX_ANTEPRIMA = 3000              # righe mostrate nell'anteprima (il salvataggi
 GRIGIO, ROSSO, VERDE = "#666", "#b00020", "#1b7f3b"
 
 COSA_FA_BREVE = ("Scarica dai Manifesti degli Studi PoliMi insegnamenti, scaglioni e orari, "
-                 "e li salva in Excel, CSV, pagina web o come orario da stampare.")
+                 "e li salva in Excel, CSV, pagina web o come orario da stampare. "
+                 "Oppure cerca al volo chi insegna cosa, quando e dove.")
 COSA_FA = ("Scarica dal sito dei Manifesti degli Studi del Politecnico di Milano gli insegnamenti dei corsi "
            "che scegli, con gli scaglioni (gli studenti divisi per iniziale del cognome, ognuno con i suoi "
            "docenti) e l'orario delle lezioni. Poi puoi filtrarli e salvarli in Excel, CSV, pagina web "
@@ -58,6 +62,22 @@ GUIDA = [
      "2 · Scheda «Esplora ed esporta»: apri un file di dati, scegli una tabella, restringi i risultati con "
      "i filtri e salva le righe che vedi.\n\n"
      "Se hai già scaricato i dati in passato puoi andare direttamente alla scheda 2."),
+    ("Scheda 3 · Cerca sul sito",
+     "Per una domanda precisa non serve scaricare nulla: la scheda «Cerca sul sito» interroga il sito al volo "
+     "e risponde in pochi secondi.\n"
+     "• Chi insegna un insegnamento: i docenti, ognuno con il suo orario e il suo scaglione. Con le fasce "
+     "orarie (es. «gio 08:15-10:15, ven 10:15-13:15») in cima trovi, evidenziato in verde, chi le copre tutte. "
+     "È il modo per scoprire il docente quando conosci solo l'orario delle lezioni.\n"
+     "• Scheda di un docente: insegnamenti, scaglioni, orario e contatti.\n"
+     "• Insegnamenti e docenti: chi insegna cosa, cercando per insegnamento o per docente.\n"
+     "• Aule: chi occupa ogni aula in un giorno, oppure quali aule sono libere in una fascia oraria.\n"
+     "• Informazioni su un corso: piani di studio, docenti, programmi interdisciplinari, scambi.\n"
+     "• Vecchi ordinamenti: insegnamenti precedenti al D.M. 509.\n\n"
+     "Doppio clic su una riga per vederla per intero; da lì (o con il pulsante sotto la tabella) apri la "
+     "scheda del docente o la pagina sul sito. I risultati si salvano in Excel, CSV, pagina web o JSON.\n\n"
+     "Fasce orarie: un intervallo (gio 08:15-10:15) deve essere coperto tutto da una lezione; un'ora sola "
+     "(gio 08:15) vuol dire «a lezione in quel momento». Si possono scrivere a mano oppure comporre con "
+     "giorno, «dalle», «alle» e «＋ Aggiungi fascia»."),
     ("Parole da conoscere",
      "• Corso di studi: per esempio Ingegneria Informatica. Ogni corso ha un codice numerico.\n"
      "• Tipo di laurea: Laurea (primo livello), Laurea Magistrale, Ciclo Unico… «ord. 96/23» indica il "
@@ -187,6 +207,25 @@ class Suggerimento:
         if self._finestra:
             self._finestra.destroy()
             self._finestra = None
+
+
+def salva_file(widget, path, scrivi, testo):
+    """Esegue scrivi(); se va bene propone di aprire il file, altrimenti spiega il problema."""
+    try:
+        widget.config(cursor="watch")
+        widget.update_idletasks()
+        scrivi()
+    except PermissionError:
+        messagebox.showerror("File in uso", "Non riesco a scrivere il file: forse è aperto in Excel "
+                             "o in un altro programma? Chiudilo e riprova.")
+        return
+    except Exception as e:
+        messagebox.showerror("Salvataggio non riuscito", f"{path}\n\n{e}")
+        return
+    finally:
+        widget.config(cursor="")
+    if messagebox.askyesno("Salvato", f"{testo}\n\n{path}\n\nVuoi aprirlo adesso?"):
+        apri_percorso(path)
 
 
 def aiuto(testo, *widgets):
@@ -824,6 +863,9 @@ class SchedaScarica(ttk.Frame):
             conteggi += (f"\n\n{r['insegnamenti_con_errore']} insegnamenti non sono stati letti per un errore "
                          "(li trovi nella colonna «Note»): puoi rilanciare lo scaricamento, "
                          "quelli già letti verranno presi dalla cache.")
+        if r.get("insegnamenti_con_errore_sito"):
+            conteggi += ("\n\nPer alcuni insegnamenti il sito oggi risponde con un suo errore. Docenti e orari "
+                         "si trovano lo stesso nella scheda «3 · Cerca sul sito» → «Chi insegna».")
         if meta.get("errore"):
             self.lbl_prog.config(text="Fermato da un errore (dati parziali salvati)")
             titolo, icona = "Scaricamento incompleto", "warning"
@@ -1276,22 +1318,7 @@ class SchedaEsplora(ttk.Frame):
                                             filetypes=[(descr, f"*.{ext}")])
 
     def _salva(self, path, scrivi, testo):
-        """Esegue scrivi(); se va bene propone di aprire il file, altrimenti spiega il problema."""
-        try:
-            self.config(cursor="watch")
-            self.update_idletasks()
-            scrivi()
-        except PermissionError:
-            messagebox.showerror("File in uso", "Non riesco a scrivere il file: forse è aperto in Excel "
-                                 "o in un altro programma? Chiudilo e riprova.")
-            return
-        except Exception as e:
-            messagebox.showerror("Salvataggio non riuscito", f"{path}\n\n{e}")
-            return
-        finally:
-            self.config(cursor="")
-        if messagebox.askyesno("Salvato", f"{testo}\n\n{path}\n\nVuoi aprirlo adesso?"):
-            apri_percorso(path)
+        salva_file(self, path, scrivi, testo)
 
     def _esporta(self, fmt):
         if not self._pronto():
@@ -1341,6 +1368,594 @@ class SchedaEsplora(ttk.Frame):
                     "Orario settimanale creato: si apre nel browser e si può stampare o salvare in PDF.")
 
 
+# ============================================================ scheda 3: cerca sul sito
+
+TUTTE_SEDI = "(tutte le sedi)"
+GIORNI_FASCE = ["lun", "mar", "mer", "gio", "ven", "sab"]
+
+# le ricerche della scheda 3: chiave -> (titolo del pulsante, spiegazione con un esempio)
+RICERCHE = {
+    "chi": ("Chi insegna un insegnamento",
+            "I docenti di un insegnamento, ognuno con il suo orario e il suo scaglione. Se scrivi delle fasce "
+            "orarie, in cima trovi chi le copre tutte. Esempio: «geometria e algebra lineare», sede Milano "
+            "Leonardo, fasce «gio 08:15-10:15, ven 10:15-13:15»."),
+    "docente": ("Scheda di un docente",
+                "Insegnamenti, scaglioni (lettere dei cognomi), orario delle lezioni e contatti di un docente. "
+                "Scrivi il cognome o una parte del nome (es. «compagnoni»); se ci sono più docenti, scegli quello "
+                "giusto dall'elenco con un doppio clic."),
+    "insegnamenti": ("Insegnamenti e docenti",
+                     "Gli insegnamenti che contengono le parole cercate (o il codice), ognuno con i suoi docenti. "
+                     "Puoi cercare anche solo per docente."),
+    "aule": ("Aule: chi le occupa / aule libere",
+             "Per uno o più giorni: chi usa ogni aula e a che ora (insegnamento e docente), oppure quali aule sono "
+             "libere in una fascia oraria. I dati sono quelli del sito «Spazi» del Politecnico."),
+    "corso": ("Informazioni su un corso di studi",
+              "Struttura e piani di studio, elenco dei docenti con i loro insegnamenti, programmi "
+              "interdisciplinari, accordi di scambio internazionali. Serve il codice del corso (es. 531)."),
+    "vecchi": ("Vecchi ordinamenti (prima del D.M. 509)",
+               "Insegnamenti delle lauree di vecchio ordinamento, cercati per nome o per docente."),
+}
+
+
+class SchedaCerca(ttk.Frame):
+    """Ricerche al volo sul sito (cerca.py): non serve scaricare nulla prima, i risultati arrivano
+    in pochi secondi. Ogni ricerca gira in un thread e manda messaggi nella coda self.q."""
+
+    def __init__(self, app, parent):
+        super().__init__(parent, padding=10)
+        self.app = app
+        self.q = queue.Queue()
+        self.stop = threading.Event()
+        self.lavoro = None
+        self.ris = None                 # ultimo cerca.Risultato
+        self.righe = []                 # righe mostrate, nell'ordine della tabella
+        self.ordine = (None, False)
+        self.map_aa, self.map_sede, self.map_sede_aule = {}, {}, {}
+        self.var = {}                   # campi di testo: chiave -> StringVar
+        self.cb = {}                    # menu: chiave -> Combobox
+        self._costruisci()
+        self._tipo_cambiato()
+        self._carica_scelte()
+        self.after(100, self._svuota_coda)
+
+    # ---------------------------------------------------------------- layout
+    def _costruisci(self):
+        # in alto, affiancati: ① il tipo di ricerca (a sinistra) e ② i suoi campi; sotto, tutta la
+        # larghezza e l'altezza rimasta per ③ i risultati
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        s1 = Sezione(self, "① Cosa vuoi cercare")
+        s1.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self.var_tipo = tk.StringVar(value="chi")
+        for i, (k, (titolo, spiegazione)) in enumerate(RICERCHE.items()):
+            rb = ttk.Radiobutton(s1, text=titolo, value=k, variable=self.var_tipo, command=self._tipo_cambiato)
+            rb.grid(row=i, column=0, sticky="w", pady=2)
+            aiuto(spiegazione, rb)
+
+        s2 = Sezione(self, "② Dati della ricerca")
+        s2.grid(row=0, column=1, sticky="nsew")
+        s2.columnconfigure(0, weight=1)
+        self.lbl_spiega = ttk.Label(s2, foreground=GRIGIO, justify="left")
+        self.lbl_spiega.grid(row=0, column=0, sticky="w", pady=(0, 6))
+        s2.bind("<Configure>", lambda e: self.lbl_spiega.config(wraplength=max(300, e.width - 30)))
+        self.fr_anno = ttk.Frame(s2)
+        self.fr_anno.grid(row=1, column=0, sticky="w")
+        lbl = ttk.Label(self.fr_anno, text="Anno accademico", width=24)
+        lbl.grid(row=0, column=0, sticky="w")
+        self.cb_aa = ttk.Combobox(self.fr_anno, state="readonly", width=14)
+        self.cb_aa.grid(row=0, column=1, sticky="w", pady=3)
+        aiuto("L'anno accademico in cui cercare. Parte da quello attuale del sito; l'elenco arriva dal sito.",
+              lbl, self.cb_aa)
+
+        self.moduli = {}
+        for k in RICERCHE:
+            fr = ttk.Frame(s2)
+            fr.grid(row=2, column=0, sticky="ew")
+            self.moduli[k] = fr
+
+        # chi insegna
+        fr = self.moduli["chi"]
+        self._campo(fr, 0, "chi_ins", "Insegnamento", "es. geometria e algebra lineare  oppure  082747",
+                    "Il nome dell'insegnamento (anche solo una parte, almeno 3 lettere) oppure il suo codice.")
+        self._menu(fr, 1, "chi_sede", "Sede", "Cerca solo i docenti che insegnano in questa sede.")
+        self._campo(fr, 2, "chi_fasce", "Fasce orarie (facoltative)", "es. gio 08:15-10:15, ven 10:15-13:15",
+                    "Le lezioni che cerchi, separate da virgole. Un intervallo (gio 08:15-10:15) deve essere "
+                    "coperto tutto da una lezione; un'ora sola (gio 08:15) vuol dire «a lezione in quel "
+                    "momento». Lascia vuoto per vedere gli orari di tutti i docenti.", larghezza=50)
+        aggiungi = ttk.Frame(fr)
+        aggiungi.grid(row=3, column=1, columnspan=2, sticky="w", pady=(0, 4))
+        self.cb_giorno = ttk.Combobox(aggiungi, state="readonly", width=5, values=GIORNI_FASCE)
+        self.cb_giorno.grid(row=0, column=0)
+        ttk.Label(aggiungi, text="dalle").grid(row=0, column=1, padx=4)
+        self.var["f_dalle"] = tk.StringVar()
+        ttk.Entry(aggiungi, textvariable=self.var["f_dalle"], width=6).grid(row=0, column=2)
+        ttk.Label(aggiungi, text="alle").grid(row=0, column=3, padx=4)
+        self.var["f_alle"] = tk.StringVar()
+        ttk.Entry(aggiungi, textvariable=self.var["f_alle"], width=6).grid(row=0, column=4)
+        b = ttk.Button(aggiungi, text="＋ Aggiungi fascia", command=self._aggiungi_fascia)
+        b.grid(row=0, column=5, padx=(8, 4))
+        aiuto("Un modo guidato per scrivere le fasce: scegli il giorno, scrivi le ore (es. 08:15 e 10:15; "
+              "«alle» si può lasciare vuoto) e premi qui. La fascia si aggiunge al campo sopra.", b, self.cb_giorno)
+        ttk.Button(aggiungi, text="Svuota", command=lambda: self.var["chi_fasce"].set("")).grid(row=0, column=6)
+
+        # scheda docente
+        fr = self.moduli["docente"]
+        self._campo(fr, 0, "doc_chi", "Docente", "es. compagnoni  oppure il codice  245289",
+                    "Il cognome o una parte del nome (almeno 3 lettere), oppure il codice numerico del docente.")
+
+        # insegnamenti e docenti
+        fr = self.moduli["insegnamenti"]
+        self._campo(fr, 0, "ins_testo", "Insegnamento", "es. analisi matematica 1  oppure  082740",
+                    "Parte del nome o del codice dell'insegnamento. Puoi lasciarlo vuoto se cerchi per docente.")
+        self._campo(fr, 1, "ins_doc", "Docente (facoltativo)", "es. rossi",
+                    "Parte del nome del docente. Puoi lasciarlo vuoto se cerchi per insegnamento.")
+        self._menu(fr, 2, "ins_sede", "Sede", "Cerca solo gli insegnamenti di questa sede.")
+
+        # aule
+        fr = self.moduli["aule"]
+        self._menu(fr, 0, "aule_sede", "Sede", "La sede (o il singolo indirizzo) di cui vedere le aule. "
+                   "Milano Leonardo è «Milano Città Studi».")
+        e = self._campo(fr, 1, "aule_giorno", "Giorno", "",
+                        "Il giorno da guardare, scritto come 15/10/2026.", larghezza=12)
+        rapidi = ttk.Frame(fr)
+        rapidi.grid(row=1, column=2, sticky="w", padx=8)
+        for testo, giorni in (("Oggi", 0), ("Domani", 1)):
+            ttk.Button(rapidi, text=testo, width=8, command=lambda g=giorni: self.var["aule_giorno"].set(
+                (date.today() + timedelta(days=g)).strftime("%d/%m/%Y"))).pack(side="left", padx=(0, 4))
+        ttk.Label(rapidi, text="gg/mm/aaaa", foreground=GRIGIO).pack(side="left", padx=4)
+        self._campo(fr, 2, "aule_al", "Fino al (facoltativo)", "per più giorni insieme, al massimo 14",
+                    "Per guardare più giorni di fila: l'ultimo giorno, come 16/10/2026.", larghezza=12)
+        self._campo(fr, 3, "aule_aula", "Aula (facoltativa)", "es. T.2.2",
+                    "Solo questa aula, scritta come sul sito (es. T.2.2, 5.0.1, B.4.4).", larghezza=12)
+        self._campo(fr, 4, "aule_testo", "Parole (facoltative)", "es. geometria  oppure  compagnoni  oppure  082747",
+                    "Tiene solo le occupazioni che contengono tutte queste parole: nome o codice "
+                    "dell'insegnamento, nome del docente.")
+        ore = ttk.Frame(fr)
+        ore.grid(row=5, column=1, columnspan=2, sticky="w", pady=3)
+        lbl = ttk.Label(fr, text="Ore (facoltative)")
+        lbl.grid(row=5, column=0, sticky="w")
+        ttk.Label(ore, text="dalle").pack(side="left")
+        self.var["aule_dalle"] = tk.StringVar()
+        e1 = ttk.Entry(ore, textvariable=self.var["aule_dalle"], width=6)
+        e1.pack(side="left", padx=4)
+        ttk.Label(ore, text="alle").pack(side="left")
+        self.var["aule_alle"] = tk.StringVar()
+        e2 = ttk.Entry(ore, textvariable=self.var["aule_alle"], width=6)
+        e2.pack(side="left", padx=4)
+        ttk.Label(ore, text="es. dalle 10:15 alle 12:15", foreground=GRIGIO).pack(side="left", padx=8)
+        aiuto("Una fascia oraria: con «Chi occupa» mostra le occupazioni in quelle ore; con «Aule libere» le aule "
+              "libere per tutta la fascia (senza ore: gli intervalli liberi tra le 8 e le 20).", lbl, e1, e2)
+        self.var_libere = tk.BooleanVar(value=False)
+        modo = ttk.Frame(fr)
+        modo.grid(row=6, column=1, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Radiobutton(modo, text="Chi occupa le aule", value=False, variable=self.var_libere).pack(side="left")
+        ttk.Radiobutton(modo, text="Aule libere", value=True, variable=self.var_libere).pack(side="left", padx=12)
+        for e in (e1, e2):
+            e.bind("<Return>", lambda ev: self._cerca())
+
+        # corso
+        fr = self.moduli["corso"]
+        self._campo(fr, 0, "corso_cod", "Codice del corso", "es. 531 (Ingegneria Informatica)",
+                    "Il codice numerico del corso di studi. Lo trovi nella scheda 1, nella colonna «Codice» "
+                    "accanto al nome del corso.", larghezza=10)
+        lbl = ttk.Label(fr, text="Cosa mostrare")
+        lbl.grid(row=1, column=0, sticky="w")
+        pagine = ttk.Frame(fr)
+        pagine.grid(row=1, column=1, columnspan=2, sticky="w", pady=3)
+        self.var_pagina = tk.StringVar(value="struttura")
+        for k, (nome, _) in cerca.PAGINE_CORSO.items():
+            ttk.Radiobutton(pagine, text=nome, value=k, variable=self.var_pagina).pack(side="left", padx=(0, 12))
+        aiuto("La pagina del sito da leggere per questo corso.", lbl)
+
+        # vecchi ordinamenti
+        fr = self.moduli["vecchi"]
+        self._campo(fr, 0, "vo_ins", "Insegnamento", "es. geometria", "Parte del nome o del codice.")
+        self._campo(fr, 1, "vo_doc", "Docente", "es. lella", "Parte del nome del docente.")
+
+        piede = ttk.Frame(s2)
+        piede.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        piede.columnconfigure(3, weight=1)
+        self.btn_cerca = ttk.Button(piede, text="🔍  Cerca", style="Accent.TButton", command=self._cerca)
+        self.btn_cerca.grid(row=0, column=0)
+        aiuto("Avvia la ricerca sul sito (anche con il tasto Invio in un campo). Di solito bastano pochi "
+              "secondi; «Chi insegna» legge la scheda di ogni docente e può volerci mezzo minuto.", self.btn_cerca)
+        self.btn_stop = ttk.Button(piede, text="Interrompi", command=self._interrompi, state="disabled")
+        self.btn_stop.grid(row=0, column=1, padx=6)
+        self.barra = ttk.Progressbar(piede, mode="indeterminate", length=140)
+        self.barra.grid(row=0, column=2, padx=(4, 10))
+        self.barra.grid_remove()  # visibile solo mentre una ricerca è in corso
+        self.lbl_stato = ttk.Label(piede, text="Collegamento al sito…", foreground=GRIGIO)
+        self.lbl_stato.grid(row=0, column=3, sticky="w")
+
+        s3 = Sezione(self, "③ Risultati (clic su un'intestazione per ordinare, doppio clic su una riga per i dettagli)")
+        s3.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+        s3.columnconfigure(0, weight=1)
+        s3.rowconfigure(3, weight=1)
+        self.lbl_titolo = ttk.Label(s3, text="Nessuna ricerca ancora.", font=("", 10, "bold"))
+        self.lbl_titolo.grid(row=0, column=0, columnspan=2, sticky="w")
+        self.lbl_note = ttk.Label(s3, justify="left")
+        self.lbl_note.grid(row=1, column=0, columnspan=2, sticky="w")
+        s3.bind("<Configure>", lambda e: self.lbl_note.config(wraplength=max(300, e.width - 30)))
+        self.fr_tab = ttk.Frame(s3)
+        self.fr_tab.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 2))
+        self.var_tab = tk.IntVar(value=0)
+        self.tree = ttk.Treeview(s3, show="headings")
+        ys = ttk.Scrollbar(s3, orient="vertical", command=self.tree.yview)
+        xs = ttk.Scrollbar(s3, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+        self.tree.grid(row=3, column=0, sticky="nsew")
+        ys.grid(row=3, column=1, sticky="ns")
+        xs.grid(row=4, column=0, sticky="ew")
+        self.tree.tag_configure("alt", background="#f2f5f9")
+        self.tree.tag_configure("pieno", background="#dff3e4")  # chi copre tutte le fasce
+        self.tree.bind("<Double-1>", self._dettaglio_riga)
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self._aggiorna_pulsanti())
+        basso = ttk.Frame(s3)
+        basso.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        basso.columnconfigure(0, weight=1)
+        self.lbl_n = ttk.Label(basso, text="")
+        self.lbl_n.grid(row=0, column=0, sticky="w")
+        self.btn_docente = ttk.Button(basso, text="Apri la scheda del docente", state="disabled",
+                                      command=lambda: self._apri_docente(self._riga_selezionata()))
+        self.btn_docente.grid(row=0, column=1, padx=6)
+        aiuto("Cerca la scheda completa (insegnamenti, scaglioni, orario) del docente della riga selezionata.",
+              self.btn_docente)
+        self.btn_sito = ttk.Button(basso, text="Apri sul sito del PoliMi", state="disabled",
+                                   command=lambda: self._apri_sito(self._riga_selezionata()))
+        self.btn_sito.grid(row=0, column=2)
+
+        s4 = Sezione(self, "④ Salva i risultati")
+        s4.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        formati = [
+            ("xlsx", "Excel (.xlsx)", "Tutte le tabelle del risultato, un foglio ciascuna."),
+            ("csv", "CSV (.csv)", "La tabella che vedi, in testo separato da «;» (si apre in Excel)."),
+            ("html", "Pagina web (.html)", "La tabella che vedi, in una pagina con ricerca e ordinamento."),
+            ("json", "JSON (.json)", "La tabella che vedi, per altri programmi."),
+        ]
+        for i, (fmt, testo, spiegazione) in enumerate(formati):
+            b = ttk.Button(s4, text=testo, command=lambda f=fmt: self._salva(f))
+            b.grid(row=0, column=i, padx=(0, 6))
+            aiuto(spiegazione, b)
+
+    def _campo(self, fr, r, chiave, etichetta, esempio, spiegazione, larghezza=40):
+        lbl = ttk.Label(fr, text=etichetta, width=24)
+        lbl.grid(row=r, column=0, sticky="w")
+        self.var[chiave] = tk.StringVar()
+        e = ttk.Entry(fr, textvariable=self.var[chiave], width=larghezza)
+        e.grid(row=r, column=1, sticky="w", pady=3)
+        e.bind("<Return>", lambda ev: self._cerca())
+        if esempio:
+            ttk.Label(fr, text=esempio, foreground=GRIGIO).grid(row=r, column=2, sticky="w", padx=8)
+        aiuto(spiegazione, lbl, e)
+        return e
+
+    def _menu(self, fr, r, chiave, etichetta, spiegazione):
+        lbl = ttk.Label(fr, text=etichetta, width=24)
+        lbl.grid(row=r, column=0, sticky="w")
+        cb = self.cb[chiave] = ttk.Combobox(fr, state="readonly", width=38, values=[VUOTO])
+        cb.set(VUOTO)
+        cb.grid(row=r, column=1, sticky="w", pady=3)
+        aiuto(spiegazione, lbl, cb)
+        return cb
+
+    def _tipo_cambiato(self):
+        k = self.var_tipo.get()
+        for nome, fr in self.moduli.items():
+            if nome == k:
+                fr.grid()
+            else:
+                fr.grid_remove()
+        if k in ("aule", "vecchi"):  # il sito Spazi e i vecchi ordinamenti non dipendono dall'anno
+            self.fr_anno.grid_remove()
+        else:
+            self.fr_anno.grid()
+        self.lbl_spiega.config(text=RICERCHE[k][1])
+
+    def _aggiungi_fascia(self):
+        g, dalle, alle = self.cb_giorno.get(), self.var["f_dalle"].get().strip(), self.var["f_alle"].get().strip()
+        try:
+            if not g:
+                raise ValueError("Scegli il giorno.")
+            if not dalle:
+                raise ValueError("Scrivi l'ora di inizio, per esempio 08:15.")
+            fascia = f"{g} {dalle}" + (f"-{alle}" if alle else "")
+            cerca.leggi_fasce(fascia)  # controlla ore e ordine
+        except ValueError as e:
+            messagebox.showwarning("Fascia oraria", str(e))
+            return
+        attuale = self.var["chi_fasce"].get().strip().rstrip(",")
+        self.var["chi_fasce"].set(f"{attuale}, {fascia}" if attuale else fascia)
+        self.var["f_dalle"].set(self.var["f_alle"].get())  # la fascia dopo parte spesso dove finisce questa
+        self.var["f_alle"].set("")
+
+    # ---------------------------------------------------------------- scelte dal sito
+    def _carica_scelte(self):
+        def run():
+            try:
+                self.q.put(("scelte", cerca.scelte(), None))
+            except Exception as e:
+                self.q.put(("scelte", None, e))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _scelte_caricate(self, sc, err):
+        if err:
+            self.lbl_stato.config(text="Sito non raggiungibile: controlla la connessione e riavvia il programma.",
+                                  foreground=ROSSO)
+            return
+        self.map_aa = {nome: cod for cod, nome in sc["aa"]}
+        self.cb_aa.config(values=list(self.map_aa))
+        attuale = next((n for n, c in self.map_aa.items() if c == sc["aa_attuale"]), None)
+        if attuale:
+            self.cb_aa.set(attuale)
+        self.map_sede = {nome: cod for cod, nome in sc["sedi"]}
+        for k in ("chi_sede", "ins_sede"):
+            self.cb[k].config(values=[TUTTE_SEDI] + list(self.map_sede))
+            self.cb[k].set(TUTTE_SEDI)
+        self.map_sede_aule = {nome: cod for cod, nome in sc["sedi_aule"]}
+        self.cb["aule_sede"].config(values=list(self.map_sede_aule))
+        self.lbl_stato.config(text="Pronto: scegli cosa cercare, compila i campi e premi «Cerca».", foreground=GRIGIO)
+
+    # ---------------------------------------------------------------- ricerca
+    def _prepara(self):
+        """Controlla i campi e restituisce (funzione da eseguire nel thread, descrizione per l'utente).
+        Se manca qualcosa solleva ValueError con il messaggio da mostrare.
+        Tutti i valori vengono letti qui: il thread della ricerca non deve toccare i widget."""
+        k = self.var_tipo.get()
+        v = {c: s.get().strip() for c, s in self.var.items()}
+        aa = self.map_aa.get(self.cb_aa.get())
+        if k not in ("aule", "vecchi") and not aa:
+            raise ValueError("Aspetta che il programma si colleghi al sito: l'anno accademico non è ancora caricato.")
+        sedi = {c: self.map_sede.get(self.cb[c].get()) for c in ("chi_sede", "ins_sede")}  # None = tutte
+        prog = lambda n, t: self.q.put(("prog", f"Leggo le schede dei docenti: {n} di {t}…"))  # noqa: E731
+        stop = self.stop
+        if k == "chi":
+            if len(v["chi_ins"]) < 3:
+                raise ValueError("Scrivi il nome o il codice dell'insegnamento (almeno 3 lettere).")
+            cerca.leggi_fasce(v["chi_fasce"])
+            return (lambda: cerca.chi_insegna(v["chi_ins"], v["chi_fasce"], aa, sedi["chi_sede"], stop=stop,
+                                              avanzamento=prog), "Cerco i docenti dell'insegnamento…")
+        if k == "docente":
+            if len(v["doc_chi"]) < 3 and not v["doc_chi"].isdigit():
+                raise ValueError("Scrivi il cognome del docente (almeno 3 lettere) oppure il suo codice.")
+            return lambda: cerca.scheda_docente(v["doc_chi"], aa, stop=stop), "Cerco il docente…"
+        if k == "insegnamenti":
+            if len(v["ins_testo"]) < 3 and len(v["ins_doc"]) < 3:
+                raise ValueError("Scrivi almeno 3 lettere dell'insegnamento o del docente.")
+            return (lambda: cerca.insegnamenti(v["ins_testo"], v["ins_doc"], aa, sedi["ins_sede"], stop=stop),
+                    "Cerco gli insegnamenti…")
+        if k == "aule":
+            sede_aule = self.map_sede_aule.get(self.cb["aule_sede"].get())
+            libere = self.var_libere.get()
+            if not sede_aule:
+                raise ValueError("Scegli la sede delle aule.")
+            if not v["aule_giorno"]:
+                raise ValueError("Scrivi il giorno (gg/mm/aaaa) o premi «Oggi».")
+            for c in ("aule_dalle", "aule_alle"):
+                if v[c]:
+                    cerca._minuti(v[c])
+            prog_g = lambda n, t: self.q.put(("prog", f"Leggo le occupazioni: giorno {n} di {t}…"))  # noqa: E731
+            return (lambda: cerca.occupazione_aule(
+                v["aule_giorno"], v["aule_al"] or None, sede_aule, v["aule_aula"] or None, v["aule_testo"] or None,
+                v["aule_dalle"] or None, v["aule_alle"] or None, libere, stop=stop,
+                avanzamento=prog_g), "Leggo l'occupazione delle aule…")
+        if k == "corso":
+            if not v["corso_cod"].isdigit():
+                raise ValueError("Scrivi il codice numerico del corso (es. 531). Lo trovi nella scheda 1.")
+            pagina = self.var_pagina.get()
+            return (lambda: cerca.info_corso(v["corso_cod"], pagina, aa, stop=stop),
+                    "Leggo la pagina del corso…")
+        if len(v["vo_ins"]) < 3 and len(v["vo_doc"]) < 3:
+            raise ValueError("Scrivi almeno 3 lettere dell'insegnamento o del docente.")
+        return lambda: cerca.vecchi_ordinamenti(v["vo_ins"], v["vo_doc"], stop=stop), "Cerco nei vecchi ordinamenti…"
+
+    def _cerca(self):
+        if self.in_corso():
+            return
+        try:
+            funzione, descrizione = self._prepara()
+        except ValueError as e:
+            messagebox.showwarning("Manca qualcosa", str(e))
+            return
+        self.stop.clear()
+        self.btn_cerca.config(state="disabled")
+        self.btn_stop.config(state="normal")
+        self.barra.grid()
+        self.barra.start(12)
+        self.lbl_stato.config(text=descrizione, foreground=GRIGIO)
+
+        def run():
+            try:
+                self.q.put(("fine", funzione(), None))
+            except Exception as e:
+                self.q.put(("fine", None, e))
+        self.lavoro = threading.Thread(target=run, daemon=True)
+        self.lavoro.start()
+
+    def _interrompi(self):
+        self.stop.set()
+        self.lbl_stato.config(text="Interrompo…")
+
+    def in_corso(self):
+        return self.lavoro is not None and self.lavoro.is_alive()
+
+    def _svuota_coda(self):
+        try:
+            while True:
+                msg = self.q.get_nowait()
+                if msg[0] == "scelte":
+                    self._scelte_caricate(msg[1], msg[2])
+                elif msg[0] == "prog":
+                    self.lbl_stato.config(text=msg[1])
+                elif msg[0] == "fine":
+                    self._finita(msg[1], msg[2])
+        except queue.Empty:
+            pass
+        self.after(100, self._svuota_coda)
+
+    def _finita(self, ris, err):
+        self.btn_cerca.config(state="normal")
+        self.btn_stop.config(state="disabled")
+        self.barra.stop()
+        self.barra.grid_remove()
+        if isinstance(err, ps.Interrotto) or (err is None and self.stop.is_set() and ris is None):
+            self.lbl_stato.config(text="Ricerca interrotta.", foreground=GRIGIO)
+            return
+        if err:
+            if isinstance(err, ValueError):
+                testo = str(err)
+            elif isinstance(err, ps.ErroreSito):
+                testo = f"Il sito del Politecnico non risponde a questa ricerca: {err}.\n\nÈ un problema del sito: riprova più tardi."
+            else:
+                testo = f"La ricerca non è riuscita. Controlla la connessione a internet.\n\n{err}"
+            self.lbl_stato.config(text="Ricerca non riuscita.", foreground=ROSSO)
+            messagebox.showerror("Ricerca non riuscita", testo)
+            return
+        self.lbl_stato.config(text=f"Fatto: {ris.n_righe} righe trovate.", foreground=VERDE)
+        self._mostra(ris)
+
+    # ---------------------------------------------------------------- risultati
+    def _mostra(self, ris):
+        self.ris = ris
+        self.lbl_titolo.config(text=ris.titolo)
+        self.lbl_note.config(text="\n".join("• " + n for n in ris.note),
+                             foreground=VERDE if ris.note and ris.note[0].startswith("Copre tutte") else "")
+        for w in self.fr_tab.winfo_children():
+            w.destroy()
+        # si apre la prima tabella con dei risultati (es. la scheda di un docente senza orario pubblicato)
+        self.var_tab.set(next((i for i, t in enumerate(ris.tabelle) if t.righe), 0))
+        if len(ris.tabelle) > 1:
+            ttk.Label(self.fr_tab, text="Tabella:").pack(side="left")
+            for i, t in enumerate(ris.tabelle):
+                ttk.Radiobutton(self.fr_tab, text=f"{t.nome} ({len(t.righe)})", value=i, variable=self.var_tab,
+                                command=self._aggiorna_tabella).pack(side="left", padx=(8, 4))
+        self.ordine = (None, False)
+        self._aggiorna_tabella()
+
+    def _tabella(self):
+        if not self.ris or not self.ris.tabelle:
+            return None
+        return self.ris.tabelle[min(self.var_tab.get(), len(self.ris.tabelle) - 1)]
+
+    def _aggiorna_tabella(self):
+        t = self._tabella()
+        self.tree.delete(*self.tree.get_children())
+        if t is None:
+            self.tree.config(columns=())
+            self.lbl_n.config(text="")
+            self._aggiorna_pulsanti()
+            return
+        righe = list(t.righe)
+        col_ord, desc = self.ordine
+        if col_ord in t.colonne:
+            righe.sort(key=lambda r: (r.get(col_ord) is None, _chiave(r.get(col_ord))), reverse=desc)
+        self.righe = righe
+        visibili = [c for c in t.colonne if not c.startswith("url")]  # i link si aprono col pulsante
+        self.tree.config(columns=t.colonne, displaycolumns=visibili)
+        for c in t.colonne:
+            freccia = (" ▼" if desc else " ▲") if c == col_ord else ""
+            self.tree.heading(c, text=ex.label(c) + freccia, command=lambda c=c: self._ordina(c))
+            lung = max([len(ex.label(c))] + [len(str(r.get(c) or "")) for r in righe[:200]])
+            self.tree.column(c, width=min(max(lung * 8 + 16, 60), 480), stretch=False)
+        for n, r in enumerate(righe):
+            tag = "alt" if n % 2 else ""
+            corr = str(r.get("corrispondenze") or "")
+            if corr and "/" in corr and corr.split("/")[0] == corr.split("/")[1] != "0":
+                tag = "pieno"
+            self.tree.insert("", "end", values=["" if r.get(c) is None else str(r.get(c)).replace("\n", " / ")
+                                                for c in t.colonne], tags=(tag,) if tag else ())
+        self.lbl_n.config(text=f"{len(righe)} righe." + (" Doppio clic su una riga per vederla per intero."
+                                                         if righe else ""))
+        self._aggiorna_pulsanti()
+
+    def _ordina(self, col):
+        c, desc = self.ordine
+        self.ordine = (col, not desc if c == col else False)
+        self._aggiorna_tabella()
+
+    def _riga_selezionata(self):
+        sel = self.tree.selection()
+        return self.righe[self.tree.index(sel[0])] if sel else None
+
+    def _url(self, riga):
+        if not riga:
+            return None
+        for c in ("url_docente", "valore"):
+            u = str(riga.get(c) or "")
+            if u.startswith("http"):
+                return u
+        return None
+
+    def _aggiorna_pulsanti(self):
+        r = self._riga_selezionata()
+        self.btn_docente.config(state="normal" if r and r.get("codice_docente") else "disabled")
+        self.btn_sito.config(state="normal" if self._url(r) else "disabled")
+
+    def _apri_docente(self, riga):
+        if not riga or not riga.get("codice_docente"):
+            return
+        self.var_tipo.set("docente")
+        self._tipo_cambiato()
+        self.var["doc_chi"].set(str(riga["codice_docente"]))
+        self._cerca()
+
+    def _apri_sito(self, riga):
+        u = self._url(riga)
+        if u:
+            webbrowser.open(u)
+
+    def _dettaglio_riga(self, event):
+        iid = self.tree.identify_row(event.y)
+        t = self._tabella()
+        if not iid or t is None:
+            return
+        riga = self.righe[self.tree.index(iid)]
+        w = tk.Toplevel(self)
+        w.title("Dettaglio riga")
+        w.geometry("720x480")
+        testo = ScrolledText(w, wrap="word", font=("", 10))
+        testo.pack(fill="both", expand=True)
+        testo.tag_config("b", font=("", 10, "bold"))
+        for c in t.colonne:
+            if riga.get(c) not in (None, ""):
+                testo.insert("end", f"{ex.label(c)}: ", "b")
+                testo.insert("end", f"{riga.get(c)}\n")
+        testo.config(state="disabled")
+        pulsanti = ttk.Frame(w, padding=6)
+        pulsanti.pack()
+        if riga.get("codice_docente"):
+            ttk.Button(pulsanti, text="Apri la scheda di questo docente",
+                       command=lambda: (w.destroy(), self._apri_docente(riga))).pack(side="left", padx=4)
+        if self._url(riga):
+            ttk.Button(pulsanti, text="Apri sul sito del PoliMi",
+                       command=lambda: self._apri_sito(riga)).pack(side="left", padx=4)
+        ttk.Button(pulsanti, text="Chiudi", command=w.destroy).pack(side="left", padx=4)
+
+    # ---------------------------------------------------------------- salva
+    def _salva(self, fmt):
+        t = self._tabella()
+        if t is None or not any(x.righe for x in self.ris.tabelle):
+            messagebox.showinfo("Niente da salvare", "Fai prima una ricerca che trovi qualcosa.")
+            return
+        if fmt != "xlsx" and not t.righe:
+            messagebox.showinfo("Niente da salvare", "La tabella che vedi è vuota: scegline un'altra.")
+            return
+        cartella = OUTPUT / "ricerche"
+        cartella.mkdir(parents=True, exist_ok=True)
+        nome = "".join(ch if ch.isalnum() or ch in "-_ " else "_" for ch in self.ris.titolo)[:70].strip()
+        path = filedialog.asksaveasfilename(initialdir=cartella, initialfile=f"{nome}.{fmt}",
+                                            defaultextension=f".{fmt}", filetypes=[(ex.FORMATI[fmt], f"*.{fmt}")])
+        if not path:
+            return
+        if fmt == "xlsx":
+            salva_file(self, path, lambda: cerca.salva(self.ris, path, "xlsx"),
+                       "Un foglio per ogni tabella: " + ", ".join(f"{x.nome} ({len(x.righe)})"
+                                                                  for x in self.ris.tabelle if x.righe) + ".")
+        else:
+            salva_file(self, path, lambda: ex.esporta(path, fmt, t.nome, t.colonne, t.righe, self.ris.titolo),
+                       f"{len(t.righe)} righe salvate ({t.nome}).")
+
+
 def _durata(secondi):
     minuti = round(secondi / 60)
     if minuti < 1:
@@ -1380,6 +1995,7 @@ class App(tk.Tk):
         ttk.Label(testa, text=COSA_FA_BREVE, wraplength=w - 200, justify="left",
                   font=("", 10, "bold")).grid(row=0, column=0, sticky="w")
         passi = ("Come si usa: 1 · scegli cosa scaricare e avvia  →  2 · consulta i dati e salvali.   "
+                 "Per una domanda precisa (es. chi insegna Geometria il giovedì alle 8:15): 3 · Cerca sul sito.   "
                  "Mouse fermo su un'opzione = spiegazione.")
         if self._ci_sono_dati():
             passi += "   Hai già dei dati: puoi andare subito alla scheda 2."
@@ -1392,8 +2008,10 @@ class App(tk.Tk):
         self.nb.pack(fill="both", expand=True, padx=6, pady=6)
         self.scarica = SchedaScarica(self, self.nb)
         self.esplora = SchedaEsplora(self, self.nb)
+        self.cerca = SchedaCerca(self, self.nb)
         self.nb.add(self.scarica, text="  1 · Scarica dati dal sito  ")
         self.nb.add(self.esplora, text="  2 · Esplora ed esporta  ")
+        self.nb.add(self.cerca, text="  3 · Cerca sul sito  ")
 
     @staticmethod
     def _ci_sono_dati():

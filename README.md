@@ -9,6 +9,10 @@ filtrare i dati e salvarli in **Excel, CSV, pagina web** o come **orario settima
 1. **Scarica** i dati dei corsi che ti interessano (scheda 1).
 2. **Esplora ed esporta**: consulta i dati, filtrali e salvali nel formato che preferisci (scheda 2).
 
+**Oppure, per una domanda precisa, cerca al volo** (scheda 3), senza scaricare nulla prima: *chi insegna
+Geometria e Algebra Lineare a Leonardo il giovedì 8:15–10:15 e il venerdì 10:15–13:15?*, *che orario ha
+questo docente?*, *quali aule sono libere giovedì dalle 10:15 alle 12:15?*
+
 Il programma legge soltanto il sito pubblico: non modifica nulla e non chiede credenziali.
 Funziona su **Windows**, **Linux** e **macOS**.
 
@@ -106,6 +110,33 @@ Se manca una scelta, il programma lo segnala prima di partire. Nulla viene scelt
 
    Le pagine web esportate usano sempre il tema chiaro, anche se il computer è in modalità scura.
 
+### Scheda 3 · Cerca sul sito
+Ricerche al volo: interrogano il sito e rispondono in pochi secondi, senza file di dati.
+
+1. **Cosa vuoi cercare** (a sinistra):
+
+   | Ricerca | Cosa trovi | Esempio |
+   |---|---|---|
+   | **Chi insegna un insegnamento** | i docenti, ognuno con il suo orario e il suo scaglione. Con le **fasce orarie** in cima trovi, evidenziato in verde, chi le copre tutte | *geometria e algebra lineare*, sede Milano Leonardo, fasce `gio 08:15-10:15, ven 10:15-13:15` → Compagnoni Marco, scaglione BRU – CON |
+   | **Scheda di un docente** | insegnamenti, scaglioni, orario delle lezioni, contatti | *compagnoni*, oppure il codice *245289* |
+   | **Insegnamenti e docenti** | chi insegna cosa, per insegnamento o per docente | *analisi matematica 1*, sede Milano Leonardo |
+   | **Aule** | chi occupa ogni aula, ora per ora (insegnamento e docente), oppure le **aule libere** in una fascia oraria | Milano Città Studi, 15/10/2026, libere dalle 10:15 alle 12:15 |
+   | **Informazioni su un corso** | piani di studio, elenco dei docenti, programmi interdisciplinari, scambi internazionali | corso *531* |
+   | **Vecchi ordinamenti** | insegnamenti precedenti al D.M. 509 | *geometria* |
+
+2. **Dati della ricerca**: compaiono solo i campi che servono, ognuno con un esempio accanto. Premi
+   **Cerca** (o Invio).
+   - Le **fasce orarie** si scrivono separate da virgole: un intervallo (`gio 08:15-10:15`) deve essere
+     coperto tutto da una lezione; un'ora sola (`gio 08:15`) vuol dire «a lezione in quel momento». Puoi anche
+     comporle con il menu del giorno, *dalle*, *alle* e **＋ Aggiungi fascia**.
+3. **Risultati**: alcune ricerche danno più tabelle (per esempio *Docenti* e *Orario dei docenti*): scegli
+   quale vedere sopra la tabella. Doppio clic su una riga per vederla per intero; da lì, o con i pulsanti sotto
+   la tabella, apri la **scheda del docente** o la **pagina sul sito**.
+4. **Salva**: Excel (tutte le tabelle, un foglio ciascuna), CSV, pagina web o JSON (la tabella che vedi).
+   I file vanno in `output/ricerche/`.
+
+Le aule vengono dal sito **Spazi** del Politecnico; tutto il resto dai **Manifesti degli Studi**.
+
 ## Cache
 Le pagine scaricate restano salvate nella cartella `cache/`, così ripetere o ampliare uno scaricamento è
 immediato. **Per avere i dati aggiornati dal sito usa "Svuota cache"** (scheda 1 → *Impostazioni avanzate…*),
@@ -118,6 +149,11 @@ oppure cancella la cartella `cache/`.
 - **"Non riesco a scrivere il file"**: il file è probabilmente aperto in Excel. Chiudilo e riprova.
 - **Il sito risponde con errori**: aumenta la *Pausa tra le richieste* o diminuisci le *Richieste in parallelo*
   in *Impostazioni avanzate…*.
+- **«Il sito del PoliMi risponde Errore interno»**: a volte una pagina del sito è guasta per tutti (per esempio,
+  nell'ottobre 2026, la pagina di dettaglio degli insegnamenti, quella con scaglioni e orari). Il programma lo
+  segnala nella colonna *Note* e non salva la pagina d'errore nella cache, così basta rilanciare quando il sito
+  torna a funzionare. Nel frattempo docenti e orari si trovano con la scheda 3 → *Chi insegna*, che passa
+  dalle schede dei docenti.
 
 ## Uso da terminale (facoltativo)
 ```bash
@@ -130,7 +166,24 @@ python esporta.py output/FILE.json --calendario cognome --filtro corso_codice=53
 python esporta.py output/FILE.json --tabella cognomi --lezioni-dal 05/10/2026 --unisci-consecutive --unisci-duplicati
 python esporta.py output/FILE.json --tutte --formato xlsx
 ```
-Ogni script mostra le opzioni disponibili con `--help`.
+
+Le ricerche della scheda 3 hanno il loro comando, `cerca.py`:
+```bash
+python cerca.py chi-insegna "geometria e algebra lineare" --sede MI --fasce "gio 08:15-10:15, ven 10:15-13:15"
+python cerca.py insegnamenti "analisi matematica 1" --sede MI
+python cerca.py insegnamenti --docente rossi
+python cerca.py docente compagnoni            # oppure il codice: python cerca.py docente 245289
+python cerca.py aule --sede MIA --giorno 15/10/2026 --cerca geometria
+python cerca.py aule --sede MIA --giorno 15/10/2026 --aula T.2.2 --al 16/10/2026
+python cerca.py aule --sede MIA --giorno 15/10/2026 --libere --dalle 10:15 --alle 12:15
+python cerca.py aule --elenca-sedi            # codici delle sedi per le aule (MIA = Milano Città Studi…)
+python cerca.py corso 531 --mostra docenti    # struttura | docenti | interdisciplinari | scambi
+python cerca.py vecchi-ordinamenti --insegnamento geometria
+python cerca.py chi-insegna 082747 --sede MI --out output/ricerche/gal.xlsx   # salva: .xlsx .csv .html .json
+```
+Il risultato compare nel terminale; con `--out` si salva anche su file (Excel: tutte le tabelle).
+
+Ogni script mostra le opzioni disponibili con `--help` (anche `python cerca.py chi-insegna --help`).
 
 ## Note
 - Gli orari di inizio e fine vengono ricavati dalla griglia a quarti d'ora del sito.

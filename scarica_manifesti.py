@@ -93,24 +93,7 @@ class Client:
         f = self.cache_dir / f"{key}.html" if self.cache_dir else None
         if f and f.exists():
             return f.read_text(encoding="utf-8")
-        for attempt in range(1, self.retries + 1):
-            if self.stop is not None and self.stop.is_set():
-                raise Interrotto()
-            try:
-                self._pausa(self.delay)
-                r = self.s.get(req.url, timeout=60)
-                with self._lock:
-                    self.n_requests += 1
-                r.raise_for_status()
-                r.encoding = r.encoding or "utf-8"
-                html = r.text
-                break
-            except requests.RequestException as e:
-                if attempt == self.retries:
-                    raise
-                wait = 2 ** attempt
-                self.log(f"    ! errore di rete ({e}); riprovo tra {wait}s")
-                self._pausa(wait)
+        html = self._richiesta("GET", req.url)
         if f:
             # scrittura atomica: un'interruzione non lascia file a metà nella cache
             tmp = f.with_suffix(f".{threading.get_ident()}.tmp")
@@ -118,9 +101,55 @@ class Client:
             tmp.replace(f)
         return html
 
+    def post(self, url, data):
+        """Invio di un modulo del sito (le ricerche). Mai in cache: la risposta dipende dai dati."""
+        return self._richiesta("POST", url, data)
+
+    def _richiesta(self, metodo, url, data=None):
+        """La pagina come testo. Riprova sugli errori di rete; una pagina di errore del sito
+        diventa ErroreSito subito, senza riprovare e senza finire in cache."""
+        for attempt in range(1, self.retries + 1):
+            if self.stop is not None and self.stop.is_set():
+                raise Interrotto()
+            try:
+                self._pausa(self.delay)
+                r = self.s.request(metodo, url, data=data, timeout=60)
+                with self._lock:
+                    self.n_requests += 1
+                r.encoding = r.encoding or "utf-8"
+                errore = errore_del_sito(r.text)
+                if errore:
+                    raise ErroreSito(errore)
+                r.raise_for_status()
+                return r.text
+            except requests.RequestException as e:
+                if attempt == self.retries:
+                    raise
+                wait = 2 ** attempt
+                self.log(f"    ! errore di rete ({e}); riprovo tra {wait}s")
+                self._pausa(wait)
+
 
 class Interrotto(Exception):
     """Scaricamento fermato dall'utente."""
+
+
+class ErroreSito(Exception):
+    """Il sito ha risposto con una sua pagina di errore: la pagina chiesta oggi non è disponibile."""
+
+
+def errore_del_sito(html):
+    """Il messaggio per l'utente se `html` è una pagina di errore del sito PoliMi, altrimenti None.
+    Il sito risponde così quando una sua pagina è guasta: «Errore interno, fai click per effettuare
+    il logout» (pagina brevissima) oppure «Server Error (POLIJ_…)»."""
+    if len(html) > 20000:
+        return None
+    if "Errore interno" in html and "logout" in html:
+        return "il sito del PoliMi risponde «Errore interno» per questa pagina"
+    m = re.search(r"\((POLIJ_\d+)\)", html)
+    if m and "Server Error" in html:
+        return f"il sito del PoliMi risponde con un errore del server ({m.group(1)}) per questa pagina"
+    return None
 
 
 def print_log(msg):
@@ -661,6 +690,7 @@ def riepilogo(result):
         "scaglioni": sum(i.get("n_scaglioni") or 0 for i in ins),
         "lezioni_settimanali": sum(len(s.get("orario", [])) for i in ins for s in i.get("sezioni", [])),
         "insegnamenti_con_errore": sum(1 for i in ins if i.get("errore")),
+        "insegnamenti_con_errore_sito": sum(1 for i in ins if i.get("errore_sito")),
         "corsi_con_errore": sum(1 for c in result["corsi_di_studio"] if c.get("errore")),
     }
 
@@ -769,7 +799,9 @@ def _scarica_dettagli(cli, opt, insegnamenti, log, progress):
         progress("Scaglioni e orari", n, tot)
         if err:  # un insegnamento non letto non ferma gli altri
             i["errore"] = str(err) or repr(err)
-            log(f"  ! {i.get('nome')}: {err!r}")
+            if isinstance(err, ErroreSito):
+                i["errore_sito"] = True
+            log(f"  ! {i.get('nome')}: {err if isinstance(err, ErroreSito) else repr(err)}")
             continue
         i["sezioni"], nota = res
         if nota:
@@ -862,6 +894,9 @@ def scarica(opt, log=print_log, progress=None, stop=None):
         f"({cli.n_requests} pagine scaricate dal sito)."
         + (f"\n{rie['insegnamenti_con_errore']} insegnamenti non letti per errore (vedi colonna Note)."
            if rie["insegnamenti_con_errore"] else "")
+        + ("\nIl sito oggi non mostra la pagina di dettaglio di alcuni insegnamenti (è un suo guasto). Docenti "
+           "e orari si trovano lo stesso con la ricerca «Chi insegna» (scheda «Cerca sul sito» o cerca.py)."
+           if rie["insegnamenti_con_errore_sito"] else "")
         + f"\nSalvato in: {out}")
     return out
 
